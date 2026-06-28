@@ -214,11 +214,7 @@ components.html(f"""
       try {{ w.localStorage.setItem('apm_sidebar', 'false'); }} catch(ex) {{}}
     }});
   }}
-  // Clean up footer from previous render (chat view recreates if needed)
-  var _cf = doc.getElementById('_cfooter_done');
-  if (_cf) _cf.remove();
-  var _cb = doc.querySelector('[data-testid="stBottom"]');
-  if (_cb) _cb.style.paddingBottom = '';
+  // No JS-managed footer — footer is now a native Streamlit element below the chat input
 }})();
 </script>
 """, height=0)
@@ -564,16 +560,19 @@ with st.sidebar:
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown('<div class="clear-btn">', unsafe_allow_html=True)
-    if st.button("\U0001f5d1\ufe0f Clear Chat", use_container_width=True):
-        st.session_state.messages = []
-        if st.session_state.current_chat_id and st.session_state.current_chat_id in st.session_state.chats:
-            st.session_state.chats[st.session_state.current_chat_id]["messages"] = []
-            st.session_state.chats[st.session_state.current_chat_id]["updated_at"] = datetime.now().isoformat()
-            if not chat_db.sync_chat(st.session_state.current_chat_id, user_id):
-                _db_failed()
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+    if st.session_state.current_view == "chat":
+        st.markdown('<div class="clear-btn">', unsafe_allow_html=True)
+        if st.button("\U0001f5d1\ufe0f Clear Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.chat_started = False
+            st.session_state._awaiting_response = False
+            if st.session_state.current_chat_id and st.session_state.current_chat_id in st.session_state.chats:
+                st.session_state.chats[st.session_state.current_chat_id]["messages"] = []
+                st.session_state.chats[st.session_state.current_chat_id]["updated_at"] = datetime.now().isoformat()
+                if not chat_db.sync_chat(st.session_state.current_chat_id, user_id):
+                    _db_failed()
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
     _t("sidebar_end")
 
 # --- markdown renderer ---
@@ -897,6 +896,12 @@ elif st.session_state.current_view == "chat":
     )
     _t("chat_input")
 
+    # ── Footer: rendered natively inside the same bottom block as the input ──
+    st.markdown(
+        '<div class="footer-powered">Powered by Groq, Hindsight, CascadeFlow</div>',
+        unsafe_allow_html=True,
+    )
+
     if prompt and not st.session_state.get("_awaiting_response"):
         if st.session_state.current_chat_id is None:
             _new_chat()
@@ -923,7 +928,7 @@ elif st.session_state.current_view == "chat":
         if st.session_state.messages:
             for m in st.session_state.messages:
                 st.markdown(_render_message_html(m), unsafe_allow_html=True)
-        elif not st.session_state.get("chat_started"):
+        else:
             st.markdown('<div class="home-center">', unsafe_allow_html=True)
             ui.hero()
             st.markdown('</div>', unsafe_allow_html=True)
@@ -957,6 +962,7 @@ elif st.session_state.current_view == "chat":
             "cost": info.get("cost", 0),
         }
         meta_line = _meta_bar(metadata)
+        now = _make_timestamp()
 
         _t("streaming_start")
         print("STREAM START")
@@ -964,14 +970,13 @@ elif st.session_state.current_view == "chat":
         accumulated = ""
         for j, w in enumerate(words):
             accumulated += w + " "
-            partial_html = _md(accumulated)
             cursor = '<span class="typing-cursor">\u258c</span>' if j < len(words) - 1 else ""
             typing_ph.markdown(
                 '<div class="message assistant">'
                 f'<div style="font-size:11px;color:#999;padding:2px 0 2px 12px;">{meta_line}</div>'
                 '<div class="msg-row">'
                 '<div class="avatar">\U0001f916</div>'
-                f'<div class="bubble">{partial_html}{cursor}</div>'
+                f'<div class="bubble">{accumulated}{cursor}</div>'
                 "</div>"
                 "</div>",
                 unsafe_allow_html=True,
@@ -980,23 +985,14 @@ elif st.session_state.current_view == "chat":
         print("STREAM COMPLETE")
         _t("streaming_done")
 
-        now = _make_timestamp()
-        _t("final_answer_display")
+        # ── Final render: replace streaming text with properly rendered markdown ──
+        final_html = _md(answer)
         typing_ph.markdown(
             '<div class="message assistant">'
             f'<div style="font-size:11px;color:#999;padding:2px 0 2px 12px;">{meta_line}</div>'
             '<div class="msg-row">'
             '<div class="avatar">\U0001f916</div>'
-            f'<div class="bubble">{_md(answer)}</div>'
-            "</div>"
-            '<div class="footer-row">'
-            f'<span class="msg-time">{now}</span>'
-            '<span class="msg-actions">'
-            '<button class="msg-action-btn" title="Copy">\U0001f4cb</button>'
-            '<button class="msg-action-btn" title="Regenerate">\U0001f504</button>'
-            '<button class="msg-action-btn" title="Like">\U0001f44d</button>'
-            '<button class="msg-action-btn" title="Dislike">\U0001f44e</button>'
-            "</span>"
+            f'<div class="bubble">{final_html}</div>'
             "</div>"
             "</div>",
             unsafe_allow_html=True,
@@ -1035,26 +1031,7 @@ elif st.session_state.current_view == "chat":
 
     _t("chat_footer")
 
-    # ── Render footer below chat input via JS injection ──
-    components.html(
-        """
-        <div id="_cfooter" style="display:none"></div>
-        <script>
-        (function(){
-            var d = window.parent.document;
-            if (d.getElementById('_cfooter_done')) return;
-            var el = d.createElement('div');
-            el.id = '_cfooter_done';
-            el.style.cssText = 'text-align:center;font-size:12px;color:var(--text-muted);padding:6px 0;position:fixed;bottom:0;left:0;right:0;z-index:100;pointer-events:none;background:var(--bg-primary)';
-            el.textContent = 'Powered by Groq, Hindsight, CascadeFlow';
-            d.body.appendChild(el);
-            var b = d.querySelector('[data-testid="stBottom"]');
-            if (b) b.style.paddingBottom = '28px';
-        })();
-        </script>
-        """,
-        height=0,
-    )
+    # ── Footer is now rendered natively via st.markdown() above ──
 
     # ── Auto-scroll to bottom ──
     st.markdown(
@@ -1083,6 +1060,7 @@ elif st.session_state.current_view == "resume":
 
     # ── State: analysis complete ──
     if st.session_state.get("resume_analysis_complete"):
+        st.success("✅ Resume uploaded successfully! ✅ Resume analysis completed successfully!")
         ui.resume_card(st.session_state.resume_filename or "Resume")
         with st.expander("📊 AI Resume Analysis", expanded=True):
             st.markdown(st.session_state.resume_analysis)
@@ -1094,6 +1072,7 @@ elif st.session_state.current_view == "resume":
 
     # ── State: analyzing ──
     elif st.session_state.get("resume_analyzing"):
+        st.success("✅ Resume uploaded successfully!")
         with st.status("🔍 Analyzing resume...", expanded=True) as status:
             st.write("📄 Extracting text from file...")
             text = st.session_state.get("resume_text")
@@ -1126,11 +1105,18 @@ elif st.session_state.current_view == "resume":
 
         if uploaded:
             st.session_state.resume_filename = uploaded.name
-            text = extract_resume_text(uploaded)
-            if text:
-                st.session_state.resume_text = text
-            else:
-                st.error("⚠️ Could not extract text. Please upload a valid PDF, DOCX, or TXT file.")
+            try:
+                text = extract_resume_text(uploaded)
+                if text:
+                    st.session_state.resume_text = text
+                    st.success("✅ Resume uploaded successfully!")
+                    time.sleep(1)
+                else:
+                    st.error("❌ Resume upload failed.")
+                    st.error("Could not extract text. Please upload a valid PDF, DOCX, or TXT file.")
+            except Exception as e:
+                st.error("❌ Resume upload failed.")
+                st.error(f"Error: {e}")
 
         has_text = "resume_text" in st.session_state
 
@@ -1535,6 +1521,34 @@ elif st.session_state.current_view == "weaknesses":
         "Track weaknesses identified in your interviews and monitor improvement."
     )
 
+    # ── Manual scan button (top-right of header area) ──
+    header_cols = st.columns([4, 1])
+    with header_cols[1]:
+        if st.button("🔍 Scan Latest Interview", use_container_width=True, key="scan_weaknesses_btn"):
+            reports = database.get_interview_reports(user_id)
+            if not reports:
+                st.info("ℹ️ No new interview reports found.")
+            else:
+                latest = reports[0]  # sorted by created_at desc
+                raw_weaknesses = (latest.get("weaknesses") or "").strip()
+                if not raw_weaknesses:
+                    st.info("ℹ️ No new weaknesses detected.")
+                else:
+                    items = [i.strip() for i in raw_weaknesses.replace(",", "\n").split("\n") if i.strip()]
+                    imported = 0
+                    for item in items:
+                        clean = item.lstrip("- *•0123456789.)").strip()
+                        if not clean or len(clean) < 3:
+                            continue
+                        cat = _map_weakness_category(clean)
+                        database.upsert_weakness(user_id, clean, cat)
+                        imported += 1
+                    if imported:
+                        st.success(f"✅ Weaknesses updated successfully. ({imported} imported)")
+                    else:
+                        st.info("ℹ️ No new weaknesses detected.")
+            st.rerun()
+
     weaknesses = database.get_user_weaknesses(user_id)
     reports = database.get_interview_reports(user_id)
     parsed = assessment.parse_resume_analysis(st.session_state.get("resume_analysis", ""))
@@ -1564,33 +1578,6 @@ elif st.session_state.current_view == "weaknesses":
             for s in parsed["strengths"]:
                 st.markdown(f"- {s}")
         st.markdown("---")
-
-    # ── Import from past interview reports ──
-    with st.expander("📥 Import Weaknesses from Past Reports", expanded=False):
-        if st.button("🔍 Scan Reports for Weaknesses", use_container_width=True):
-            reports = database.get_interview_reports(user_id)
-            imported_count = 0
-            existing_texts = {w["weakness_text"].strip().lower() for w in weaknesses}
-            for r in reports:
-                text = (r.get("weaknesses") or "").strip()
-                if not text:
-                    continue
-                lines = [l.strip() for l in text.replace("\\n", "\n").split("\n") if l.strip()]
-                for line in lines:
-                    line_clean = line.lstrip("- *•0123456789.)").strip()
-                    if not line_clean or line_clean.lower() in existing_texts:
-                        continue
-                    database.save_weakness(user_id, {
-                        "weakness_text": line_clean,
-                        "category": "General",
-                    })
-                    existing_texts.add(line_clean.lower())
-                    imported_count += 1
-            if imported_count:
-                st.success(f"Imported {imported_count} new weaknesses!")
-            else:
-                st.caption("No new weaknesses found in past reports.")
-            st.rerun()
 
     if weaknesses:
         active = [w for w in weaknesses if w["status"] == "active"]

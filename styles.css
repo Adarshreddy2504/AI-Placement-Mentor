@@ -1079,6 +1079,21 @@ header[data-testid="stHeader"] [data-testid="stMainMenu"] { display: none !impor
   cursor: not-allowed !important;
 }
 
+/* ===== FOOTER BELOW CHAT INPUT ===== */
+
+/* Footer is now a native Streamlit element inside [data-testid="stBottomBlockContainer"].
+   It renders directly below the chat input with consistent spacing at all screen sizes. */
+.footer-powered {
+  width: 100% !important;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted) !important;
+  line-height: 1.4;
+  margin: 0 !important;
+  padding: 4px 0 10px 0 !important;
+}
+
 /* ===== SCROLL ANCHOR ===== */
 #scroll-anchor {
   height: 0;
