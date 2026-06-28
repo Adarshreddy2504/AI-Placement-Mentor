@@ -1,3 +1,5 @@
+"""Environment variable loading — GROQ_API_KEY from .env file."""
+
 from dotenv import load_dotenv
 import os
 

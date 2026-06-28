@@ -1,123 +1,110 @@
-from hindsight_client import Hindsight
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
-
-client = Hindsight(
-    base_url=os.getenv("HINDSIGHT_BASE_URL"),
-    api_key=os.getenv("HINDSIGHT_API_KEY")
-)
-
-BANK_ID = "default"
-
+"""User-scoped persistent memory — Supabase-backed key-value store per user_id.
+Replaces the previous Hindsight-based global memory with authenticated-user scoping.
+"""
 
 # -----------------------------
 # Generic Functions
 # -----------------------------
 
-def save_memory(content):
-    try:
-        client.retain(
-            bank_id=BANK_ID,
-            content=content
-        )
-    except Exception as e:
-        print(e)
+def save_memory(user_id: str, content: str, key: str | None = None) -> bool:
+    """Save a text entry to the user's persistent memory.
+    If key is None, a default key like 'memory_{timestamp}' is used.
+    """
+    import database
+    import uuid
+    k = key or f"memory_{uuid.uuid4().hex[:8]}"
+    return database.upsert_user_memory(user_id, k, content)
 
 
-def search_memory(query):
-    try:
-        results = client.recall(
-            bank_id=BANK_ID,
-            query=query
-        )
-
-        if not results.results:
-            return ""
-
-        memory = ""
-
-        for item in results.results:
-            memory += item.text + "\n"
-
-        return memory
-
-    except Exception as e:
-        print(e)
+def search_memory(user_id: str) -> str:
+    """Return all persistent memory entries for the given user as formatted text."""
+    import database
+    rows = database.get_user_memory(user_id)
+    if not rows:
         return ""
+    lines = []
+    for r in rows:
+        k = r.get("key", "")
+        v = r.get("value", "")
+        label = k.replace("_", " ").title()
+        lines.append(f"- {label}: {v}")
+    return "\n".join(lines)
 
 
 # -----------------------------
 # Structured Memory Functions
 # -----------------------------
-
-def save_career_goal(goal):
-
-    save_memory(f"""
-Career Goal
-
-User wants to become:
-{goal}
-""")
+import database
+def save_career_goal(user_id: str, goal: str) -> bool:
+    """Store a user career goal in persistent memory."""
+    return database.upsert_user_memory(user_id, "career_goal", goal.strip())
 
 
-def save_resume_summary(summary):
-
-    save_memory(f"""
-Resume Summary
-
-{summary}
-""")
+def save_learning_progress(user_id: str, progress: str) -> bool:
+    """Store learning progress update in persistent memory."""
+    return database.upsert_user_memory(user_id, "learning_progress", progress.strip())
 
 
-def save_interview_result(report):
-
-    save_memory(f"""
-Interview Report
-
-{report}
-""")
+def save_resume_analysis(user_id: str, analysis: str) -> bool:
+    """Store a summary of resume analysis in persistent memory (truncated to 600 chars)."""
+    summary = analysis.strip()[:600]
+    return database.upsert_user_memory(user_id, "resume_analysis_summary", summary)
 
 
-def save_learning_progress(progress):
-
-    save_memory(f"""
-Learning Progress
-
-{progress}
-""")
-def save_resume_analysis(analysis):
-
-    save_memory(f"""
-Resume Analysis
-
-{analysis}
-""")
+def save_ats_score(user_id: str, score: str) -> bool:
+    """Store ATS score line in persistent memory."""
+    return database.upsert_user_memory(user_id, "ats_score", score.strip())
 
 
-def save_ats_score(score):
-
-    save_memory(f"""
-ATS Score
-
-{score}
-""")
+def save_missing_skills(user_id: str, skills: str) -> bool:
+    """Store missing skills data in persistent memory."""
+    return database.upsert_user_memory(user_id, "missing_skills", skills.strip())
 
 
-def save_missing_skills(skills):
+def save_interview_report(user_id: str, report: str) -> bool:
+    """Store a summary of the latest interview report in persistent memory
+    (truncated to 600 chars). Overwrites the previous entry.
+    """
+    summary = report.strip()[:600]
+    return database.upsert_user_memory(user_id, "interview_report_summary", summary)
 
-    save_memory(f"""
-Missing Skills
 
-{skills}
-""")
+# -----------------------------
+# Interview Context Builder (unchanged — reads from Supabase tables directly)
+# -----------------------------
 
+def build_interview_memory_context(user_id: str) -> str:
+    """Build a text summary of past interview performance and persistent weaknesses for AI context."""
+    try:
+        import database
+        reports = database.get_interview_reports(user_id)
+        weaknesses = database.get_user_weaknesses(user_id)
+    except Exception:
+        return ""
 
-def save_interview_report(report):
+    lines = []
+    if reports:
+        lines.append("=== PAST INTERVIEW PERFORMANCE ===")
+        for i, r in enumerate(reports[:3], 1):
+            score = r.get("overall_score", "?")
+            tech = r.get("technical_score", "?")
+            comm = r.get("communication_score", "?")
+            conf = r.get("confidence_score", "?")
+            weak = (r.get("weaknesses") or "")[:200]
+            lines.append(f"Interview {i}: Overall={score}/10, Tech={tech}/10, Comm={comm}/10, Conf={conf}/10")
+            if weak:
+                lines.append(f"  Weaknesses: {weak}")
 
-    save_memory(f"""
-Interview Report
+    active_weak = [w for w in weaknesses if w["status"] in ("active", "improving")]
+    if active_weak:
+        lines.append("")
+        lines.append("=== PERSISTENT WEAKNESSES TO REVISIT ===")
+        for w in active_weak:
+            lines.append(f"- {w['weakness_text']} (detected {w.get('detected_count', 1)}x)")
 
-{report}
-""")
+    if lines:
+        lines.append("")
+        lines.append("---")
+        lines.append("Use this context to tailor questions toward previously weak areas and track improvement.")
+
+    return "\n".join(lines)

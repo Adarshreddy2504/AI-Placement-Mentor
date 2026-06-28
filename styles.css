@@ -15,7 +15,6 @@
   --radius-lg: 16px;
   --radius-xl: 20px;
   --radius-full: 9999px;
-  --transition: 0.35s ease;
 
   --bg-primary: #0f0f15;
   --bg-secondary: #16161f;
@@ -60,12 +59,7 @@
   --success-border: rgba(34,197,94,0.2);
 }
 
-*, *::before, *::after {
-  transition: background-color var(--transition),
-              color var(--transition),
-              border-color var(--transition),
-              box-shadow var(--transition);
-}
+/* No global transition — prevents blur/flash on Streamlit reruns */
 
 .stApp, .main {
   background: var(--bg-primary) !important;
@@ -75,6 +69,10 @@
 
 footer { visibility: hidden !important; }
 [data-testid="stStatusWidget"] { display: none !important; }
+/* Suppress Streamlit loading spinner and overlay during reruns */
+div[role="status"] { display: none !important; }
+.stAppLoading, .stApp [data-testid="stAppLoading"] { display: none !important; }
+iframe[title="streamlit-spinner"] { display: none !important; }
 header[data-testid="stHeader"] {
   background: var(--bg-primary) !important;
   border: none !important;
@@ -435,12 +433,6 @@ header[data-testid="stHeader"] [data-testid="stMainMenu"] { display: none !impor
   flex-direction: column;
   align-items: center;
   padding-top: 80px;
-  animation: heroFadeIn 0.3s ease-out;
-}
-
-@keyframes heroFadeIn {
-  from { opacity: 0; transform: translateY(16px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 
 .hero-wrap {
@@ -705,110 +697,51 @@ header[data-testid="stHeader"] [data-testid="stMainMenu"] { display: none !impor
   gap: 6px;
 }
 
-/* ===== CHAT BUBBLES — Instagram DM Style ===== */
+/* ===== CUSTOM MESSAGE LAYOUT — ChatGPT-style ===== */
 
-/* Base message container */
-[data-testid="stChatMessage"] {
-  background: transparent !important;
-  border: none !important;
-  padding: 2px 0 !important;
-  margin: 0 !important;
-  animation: msgSlideIn 0.25s ease-out !important;
+/* Outer container: each message is a column (bubble-row + footer-row) */
+.message {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+  margin: 0;
 }
 
-[data-testid="stChatMessage"] > div {
-  gap: 8px !important;
-  align-items: flex-end !important;
+/* Row that holds avatar + bubble side by side */
+.msg-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
 }
 
-/* ===== USER MESSAGES ===== */
-/* Hide user avatar entirely (no avatar for right-aligned msgs) */
-[data-testid="stChatMessageAvatarUser"] {
-  display: none !important;
+/* User: avatar on right, bubble on left */
+.message.user .msg-row {
+  flex-direction: row-reverse;
 }
 
-/* User row: content on right, no avatar */
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) {
-  flex-direction: row !important;
-  justify-content: flex-end !important;
-}
-
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) [data-testid="stChatMessageContent"] {
-  display: flex !important;
-  flex-direction: column !important;
-  align-items: flex-end !important;
-  max-width: 70% !important;
-  margin-left: auto !important;
-  flex: 0 1 auto !important;
-}
-
-/* User bubble: first child of content area is the markdown output */
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) [data-testid="stChatMessageContent"] > div:first-child {
-  background: linear-gradient(135deg, #3b82f6, #6366f1) !important;
-  color: white !important;
-  border-radius: 22px 22px 4px 22px !important;
-  padding: 10px 18px !important;
-  display: inline-block !important;
-  width: auto !important;
-  max-width: 100% !important;
-  line-height: 1.5 !important;
-  font-size: 14.5px !important;
-  word-wrap: break-word !important;
-  white-space: pre-wrap !important;
-  box-shadow: none !important;
-}
-
-/* ===== AI MESSAGES ===== */
-/* AI avatar: circular with gradient */
-[data-testid="stChatMessageAvatarAssistant"] {
-  width: 32px !important;
-  height: 32px !important;
-  min-width: 32px !important;
+/* Avatar */
+.message .avatar {
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
   border-radius: 50% !important;
-  background: linear-gradient(135deg, #3b82f6, #6366f1) !important;
+  flex-shrink: 0 !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
-  font-size: 16px !important;
-  flex-shrink: 0 !important;
-  margin-bottom: 12px !important;
+  font-size: 15px !important;
+  line-height: 1 !important;
+}
+
+.message.assistant .avatar {
+  background: linear-gradient(135deg, #3b82f6, #6366f1) !important;
   box-shadow: 0 2px 8px rgba(59,130,246,0.25) !important;
 }
 
-/* Hide default Streamlit avatar icon, show emoji */
-[data-testid="stChatMessageAvatarAssistant"] img,
-[data-testid="stChatMessageAvatarAssistant"] svg {
-  display: none !important;
-}
-
-[data-testid="stChatMessageAvatarAssistant"]::after {
-  content: "🤖";
-  line-height: 1;
-}
-
-/* AI row: avatar on left, content fills remaining space */
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) {
-  flex-direction: row !important;
-}
-
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] {
-  display: flex !important;
-  flex-direction: column !important;
-  align-items: flex-start !important;
-  flex: 1 !important;
-  min-width: 0 !important;
-}
-
-/* AI bubble: first child of content area is the markdown output */
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child {
-  background: var(--bg-tertiary) !important;
-  border: none !important;
-  color: var(--text-primary) !important;
-  border-radius: 22px 22px 22px 4px !important;
-  padding: 12px 18px !important;
-  display: inline-block !important;
-  max-width: 100% !important;
-  width: auto !important;
+/* Bubble */
+.message .bubble {
+  max-width: 70% !important;
+  padding: 8px 16px !important;
   line-height: 1.65 !important;
   font-size: 14.5px !important;
   word-wrap: break-word !important;
@@ -816,43 +749,68 @@ div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssista
   box-shadow: none !important;
 }
 
+.message.user .bubble {
+  background: linear-gradient(135deg, #3b82f6, #6366f1) !important;
+  color: white !important;
+  border-radius: 22px 22px 4px 22px !important;
+}
+
+.message.assistant .bubble {
+  background: var(--bg-tertiary) !important;
+  border: none !important;
+  color: var(--text-primary) !important;
+  border-radius: 22px 22px 22px 4px !important;
+  font-size: 16px !important;
+}
+
+/* Footer row (timestamp + actions) */
+.message .footer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  padding-left: 0;
+}
+
+.message.user .footer-row {
+  justify-content: flex-end;
+  padding-right: 38px;
+}
+
+.message.assistant .footer-row {
+  justify-content: flex-start;
+  padding-left: 38px;
+}
+
+/* ===== MESSAGE METADATA ===== */
+.msg-meta {
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: var(--text-muted) !important;
+  padding: 0 0 6px 12px !important;
+  line-height: 1.4 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
 /* ===== TIMESTAMPS ===== */
-.msg-time {
+.message .msg-time {
   font-size: 11px !important;
   color: var(--text-muted) !important;
-  margin-top: 3px !important;
-  margin-bottom: 2px !important;
-  display: block !important;
   opacity: 0.7 !important;
   line-height: 1 !important;
-}
-
-[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) .msg-time {
-  text-align: right !important;
-}
-
-[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) .msg-time {
-  text-align: left !important;
+  display: inline !important;
 }
 
 /* ===== HOVER ACTIONS ===== */
-.msg-actions {
+.message .msg-actions {
   display: none !important;
   gap: 2px !important;
-  margin-top: 2px !important;
-  margin-bottom: 4px !important;
 }
 
-[data-testid="stChatMessage"]:hover .msg-actions {
-  display: flex !important;
-}
-
-[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) .msg-actions {
-  justify-content: flex-end !important;
-}
-
-[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) .msg-actions {
-  justify-content: flex-start !important;
+.message:hover .msg-actions {
+  display: inline-flex !important;
 }
 
 .msg-action-btn {
@@ -906,185 +864,6 @@ div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssista
   30% { opacity: 1; transform: translateY(-2px); }
 }
 
-/* ===== BUBBLE SLIDE-IN ANIMATION ===== */
-@keyframes msgSlideIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* ===== COMPACT CONVERSATION SPACING ===== */
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) {
-  margin: 1px 0 !important;
-}
-
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) {
-  margin: 2px 0 !important;
-}
-
-/* Hide Streamlit's message meta bar */
-.message-meta {
-  display: none !important;
-}
-
-/* Chat container fills available space */
-[data-testid="stChatMessage"] [data-testid="stChatMessageContent"] > div {
-  min-width: 0 !important;
-}
-
-/* ===== RICH MARKDOWN INSIDE AI BUBBLES ===== */
-
-/* The first child of stChatMessageContent is the markdown output (the bubble) */
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h1,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h2,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h3,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h4 {
-  color: var(--text-primary) !important;
-  margin-top: 16px !important;
-  margin-bottom: 6px !important;
-  font-weight: 700 !important;
-  line-height: 1.3 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h1 {
-  font-size: 20px !important;
-  border-bottom: 1px solid var(--border) !important;
-  padding-bottom: 5px !important;
-  margin-top: 8px !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h2 {
-  font-size: 17px !important;
-  color: var(--accent) !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h3 {
-  font-size: 15px !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h4 {
-  font-size: 14px !important;
-  color: var(--text-secondary) !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h1:first-child,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h2:first-child,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child h3:first-child {
-  margin-top: 4px !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child p {
-  margin: 0 0 10px 0 !important;
-  color: var(--text-secondary) !important;
-  line-height: 1.75 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child p:last-child {
-  margin-bottom: 0 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child strong {
-  color: var(--text-primary) !important;
-  font-weight: 700 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child em {
-  color: var(--text-secondary) !important;
-  font-style: italic !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child ul,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child ol {
-  padding-left: 22px !important;
-  margin: 4px 0 10px 0 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child li {
-  margin-bottom: 4px !important;
-  line-height: 1.65 !important;
-  color: var(--text-secondary) !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child li:last-child {
-  margin-bottom: 0 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child li > p {
-  margin: 0 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child ul ul,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child ol ol,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child ul ol,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child ol ul {
-  margin: 2px 0 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child pre {
-  background: var(--bg-secondary) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: var(--radius-md) !important;
-  padding: 14px 16px !important;
-  overflow-x: auto !important;
-  margin: 8px 0 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child pre code {
-  background: transparent !important;
-  border: none !important;
-  padding: 0 !important;
-  color: var(--text-primary) !important;
-  font-size: 13px !important;
-  line-height: 1.55 !important;
-  font-family: var(--font-mono) !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child p code,
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child li code {
-  background: var(--bg-tertiary) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: 4px !important;
-  padding: 1px 6px !important;
-  font-size: 13px !important;
-  color: var(--accent) !important;
-  font-family: var(--font-mono) !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child table {
-  width: auto !important;
-  min-width: 60% !important;
-  border-collapse: collapse !important;
-  margin: 10px 0 !important;
-  font-size: 13px !important;
-  border-radius: var(--radius-sm) !important;
-  overflow: hidden !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child thead {
-  background: var(--bg-tertiary) !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child th {
-  color: var(--text-primary) !important;
-  font-weight: 700 !important;
-  padding: 9px 14px !important;
-  text-align: left !important;
-  border-bottom: 2px solid var(--accent) !important;
-  font-size: 13px !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child td {
-  padding: 8px 14px !important;
-  border-bottom: 1px solid var(--border-light) !important;
-  color: var(--text-secondary) !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child tr:last-child td {
-  border-bottom: none !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child tr:nth-child(even) td {
-  background: var(--bg-tertiary) !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child blockquote {
-  border-left: 3px solid var(--accent) !important;
-  background: var(--accent-alpha) !important;
-  padding: 10px 16px !important;
-  margin: 10px 0 !important;
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child blockquote p {
-  color: var(--text-secondary) !important;
-  margin: 0 !important;
-}
-div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] > div:first-child hr {
-  border: none !important;
-  border-top: 1px solid var(--border) !important;
-  margin: 14px 0 !important;
-}
-
 /* Typing cursor */
 @keyframes cursorPulse {
   0%, 100% { opacity: 1; }
@@ -1097,21 +876,151 @@ div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssista
   font-weight: 300;
 }
 
-.message-meta {
-  display: flex !important;
-  gap: 8px !important;
-  flex-wrap: wrap !important;
-  margin-top: 6px !important;
-  padding-top: 6px !important;
-  border-top: 1px solid var(--border-light) !important;
-  font-size: 10px !important;
-  color: var(--text-muted) !important;
-}
+/* ===== RICH MARKDOWN INSIDE BUBBLES ===== */
 
-.message-meta span {
-  display: inline-flex !important;
-  align-items: center !important;
-  gap: 3px !important;
+.message.assistant .bubble h1,
+.message.assistant .bubble h2,
+.message.assistant .bubble h3,
+.message.assistant .bubble h4 {
+  color: var(--text-primary) !important;
+  margin-top: 16px !important;
+  margin-bottom: 6px !important;
+  font-weight: 700 !important;
+  line-height: 1.3 !important;
+}
+.message.assistant .bubble h1 {
+  font-size: 20px !important;
+  border-bottom: 1px solid var(--border) !important;
+  padding-bottom: 5px !important;
+  margin-top: 8px !important;
+}
+.message.assistant .bubble h2 {
+  font-size: 17px !important;
+  color: var(--accent) !important;
+}
+.message.assistant .bubble h3 {
+  font-size: 15px !important;
+}
+.message.assistant .bubble h4 {
+  font-size: 14px !important;
+  color: var(--text-secondary) !important;
+}
+.message.assistant .bubble h1:first-child,
+.message.assistant .bubble h2:first-child,
+.message.assistant .bubble h3:first-child {
+  margin-top: 4px !important;
+}
+.message.assistant .bubble p {
+  margin: 0 0 10px 0 !important;
+  color: var(--text-secondary) !important;
+  line-height: 1.75 !important;
+}
+.message.assistant .bubble p:last-child {
+  margin-bottom: 0 !important;
+}
+.message.assistant .bubble strong {
+  color: var(--text-primary) !important;
+  font-weight: 700 !important;
+}
+.message.assistant .bubble em {
+  color: var(--text-secondary) !important;
+  font-style: italic !important;
+}
+.message.assistant .bubble ul,
+.message.assistant .bubble ol {
+  padding-left: 22px !important;
+  margin: 4px 0 10px 0 !important;
+}
+.message.assistant .bubble li {
+  margin-bottom: 4px !important;
+  line-height: 1.65 !important;
+  color: var(--text-secondary) !important;
+}
+.message.assistant .bubble li:last-child {
+  margin-bottom: 0 !important;
+}
+.message.assistant .bubble li > p {
+  margin: 0 !important;
+}
+.message.assistant .bubble ul ul,
+.message.assistant .bubble ol ol,
+.message.assistant .bubble ul ol,
+.message.assistant .bubble ol ul {
+  margin: 2px 0 !important;
+}
+.message.assistant .bubble pre {
+  background: var(--bg-secondary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-md) !important;
+  padding: 14px 16px !important;
+  overflow-x: auto !important;
+  margin: 8px 0 !important;
+}
+.message.assistant .bubble pre code {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  color: var(--text-primary) !important;
+  font-size: 13px !important;
+  line-height: 1.55 !important;
+  font-family: var(--font-mono) !important;
+}
+.message.assistant .bubble p code,
+.message.assistant .bubble li code {
+  background: var(--bg-tertiary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 4px !important;
+  padding: 1px 6px !important;
+  font-size: 13px !important;
+  color: var(--accent) !important;
+  font-family: var(--font-mono) !important;
+}
+.message.assistant .bubble table {
+  width: auto !important;
+  min-width: 60% !important;
+  border-collapse: collapse !important;
+  margin: 10px 0 !important;
+  font-size: 13px !important;
+  border-radius: var(--radius-sm) !important;
+  overflow: hidden !important;
+}
+.message.assistant .bubble thead {
+  background: var(--bg-tertiary) !important;
+}
+.message.assistant .bubble th {
+  color: var(--text-primary) !important;
+  font-weight: 700 !important;
+  padding: 9px 14px !important;
+  text-align: left !important;
+  border-bottom: 2px solid var(--accent) !important;
+  font-size: 13px !important;
+}
+.message.assistant .bubble td {
+  padding: 8px 14px !important;
+  border-bottom: 1px solid var(--border-light) !important;
+  color: var(--text-secondary) !important;
+}
+.message.assistant .bubble tr:last-child td {
+  border-bottom: none !important;
+}
+.message.assistant .bubble tr:nth-child(even) td {
+  background: var(--bg-tertiary) !important;
+}
+.message.assistant .bubble blockquote {
+  border-left: 3px solid var(--accent) !important;
+  background: var(--accent-alpha) !important;
+  padding: 10px 16px !important;
+  margin: 10px 0 !important;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
+}
+.message.assistant .bubble blockquote p {
+  color: var(--text-secondary) !important;
+  margin: 0 !important;
+}
+.message.assistant .bubble hr {
+  border: none !important;
+  border-top: 1px solid var(--border) !important;
+  margin: 14px 0 !important;
 }
 
 [data-testid="stChatInput"] > div {
@@ -1168,6 +1077,13 @@ div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssista
 [data-testid="stChatInput"] button[disabled] {
   opacity: 0.35 !important;
   cursor: not-allowed !important;
+}
+
+/* ===== SCROLL ANCHOR ===== */
+#scroll-anchor {
+  height: 0;
+  margin: 0;
+  padding: 0;
 }
 
 .resume-card {
@@ -1632,10 +1548,177 @@ textarea:focus, .stTextArea textarea:focus {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius-full); }
 
+/* ===== AUTH / LOGIN PAGE ===== */
+.auth-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 60px 20px 30px 20px;
+  gap: 16px;
+}
+
+.auth-logo {
+  width: 80px;
+  height: 80px;
+  background: var(--accent-gradient);
+  border-radius: var(--radius-xl);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 36px;
+  box-shadow: 0 8px 32px rgba(59,130,246,0.3);
+}
+
+.auth-title {
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.auth-title span {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.auth-sub {
+  font-size: 14px;
+  color: var(--text-secondary);
+  max-width: 300px;
+}
+
+.auth-hero + div[data-testid="stTabs"] {
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.auth-hero + div[data-testid="stTabs"] [data-testid="stTab"] button {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.auth-hero + div[data-testid="stTabs"] .stTextInput input {
+  background: var(--bg-tertiary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-md) !important;
+  color: var(--text-primary) !important;
+  font-size: 14px !important;
+  padding: 10px 12px !important;
+}
+
+.auth-hero + div[data-testid="stTabs"] .stTextInput input:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-alpha) !important;
+}
+
+.auth-hero + div[data-testid="stTabs"] .stButton button[kind="primary"] {
+  padding: 10px 16px !important;
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  margin-top: 8px;
+}
+
+.auth-hero + div[data-testid="stTabs"] div[data-testid="stVerticalBlock"] {
+  gap: 4px;
+}
+
+.auth-hero + div[data-testid="stTabs"] .stAlert {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+/* Logout button in sidebar */
+.logout-btn [data-testid="stButton"] button {
+  background: transparent !important;
+  border-color: var(--border) !important;
+  color: var(--text-muted) !important;
+}
+
+.logout-btn [data-testid="stButton"] button:hover {
+  border-color: var(--error) !important;
+  color: var(--error) !important;
+  background: var(--accent-alpha) !important;
+}
+
 @media (max-width: 768px) {
   .block-container { padding-left: 8px !important; padding-right: 8px !important; }
   .hero-title { font-size: 24px; }
   .hero-wrap { padding: 40px 12px 20px 12px; }
 
   .dash-grid { grid-template-columns: 1fr; }
+
+  /* Mobile chat: more compact bubbles */
+  .message {
+    padding: 2px 0 !important;
+  }
+
+  .msg-row {
+    gap: 6px !important;
+  }
+
+  .message .bubble {
+    max-width: 85% !important;
+  }
+
+  .message .avatar {
+    width: 24px !important;
+    height: 24px !important;
+    min-width: 24px !important;
+    font-size: 12px !important;
+  }
+
+  .message.user .bubble {
+    padding: 6px 12px !important;
+    font-size: 14px !important;
+    border-radius: 18px 18px 4px 18px !important;
+  }
+
+  .message.assistant .bubble {
+    padding: 6px 12px !important;
+    font-size: 15px !important;
+    border-radius: 18px 18px 18px 4px !important;
+  }
+
+  /* Mobile metadata: allow wrapping */
+  .msg-meta {
+    white-space: normal !important;
+    word-break: break-all !important;
+    padding-bottom: 4px !important;
+  }
+
+  /* Footer text */
+  .block-container > p {
+    font-size: 10px !important;
+  }
+}
+
+/* ===== RESPONSIVE CHAT LAYOUT ===== */
+
+/* Large Desktop (1920px and above) */
+@media (min-width: 1920px) {
+  .block-container {
+    max-width: 75vw !important;
+  }
+  .message .bubble {
+    max-width: 80% !important;
+  }
+}
+
+/* Desktop / Laptop (1366–1919px) */
+@media (min-width: 1366px) and (max-width: 1919px) {
+  .block-container {
+    max-width: 70vw !important;
+  }
+  .message .bubble {
+    max-width: 75% !important;
+  }
+}
+
+/* Tablet (769–1365px) — keep container at 900px, widen bubbles */
+@media (min-width: 769px) and (max-width: 1365px) {
+  .message .bubble {
+    max-width: 85% !important;
+  }
 }

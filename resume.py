@@ -1,8 +1,11 @@
+"""Resume parsing — extract text from PDF, DOCX, and TXT files."""
+
 from pypdf import PdfReader
 from docx import Document
 
 
 def extract_text_from_pdf(uploaded_file):
+    """Extract text content from an uploaded PDF file using pypdf."""
     reader = PdfReader(uploaded_file)
 
     text = ""
@@ -17,6 +20,7 @@ def extract_text_from_pdf(uploaded_file):
 
 
 def extract_text_from_docx(uploaded_file):
+    """Extract text content from an uploaded DOCX file using python-docx."""
     doc = Document(uploaded_file)
 
     text = ""
@@ -28,11 +32,12 @@ def extract_text_from_docx(uploaded_file):
 
 
 def extract_text_from_txt(uploaded_file):
+    """Decode an uploaded TXT file as UTF-8 text."""
     return uploaded_file.read().decode("utf-8")
 
 
 def extract_resume_text(uploaded_file):
-
+    """Route uploaded file to the correct extractor based on extension. Returns text or None."""
     file_name = uploaded_file.name.lower()
 
     if file_name.endswith(".pdf"):

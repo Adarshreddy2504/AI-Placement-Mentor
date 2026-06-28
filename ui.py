@@ -1,16 +1,25 @@
-from typing import Optional
+"""Reusable Streamlit UI components — auth forms, dashboard cards, headers, DB setup message."""
+
+import functools
 import streamlit as st
 
 
+@functools.lru_cache(maxsize=1)
+def _read_css(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 def load_css(path: str = "styles.css"):
+    """Inject CSS into the Streamlit DOM. File content is cached after first read."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+        st.markdown(f"<style>{_read_css(path)}</style>", unsafe_allow_html=True)
     except FileNotFoundError:
         pass
 
 
 def sidebar_header():
+    """Render the sidebar logo and title block."""
     st.markdown(
         """
         <div class="logo-row">
@@ -30,11 +39,8 @@ def dashboard(
     resume_status: str,
     interview_status: str = "Not Started",
     memory_status: str = "Enabled",
-    last_model: Optional[str] = None,
-    last_latency: Optional[float] = None,
-    last_cost: Optional[float] = None,
-    last_complexity: Optional[str] = None,
 ):
+    """Render the sidebar dashboard card with session stats (messages, resume status, interview, memory)."""
     st.markdown('<div class="sidebar-heading">Dashboard</div>', unsafe_allow_html=True)
 
     rsc = "green" if resume_status == "Uploaded" else "yellow"
@@ -69,36 +75,9 @@ def dashboard(
     </div>
     """, unsafe_allow_html=True)
 
-    if last_model is not None:
-        st.markdown(f"""
-        <div class="dash-card">
-            <div class="dash-header">
-                <span class="dash-header-label">Last Inference</span>
-                <span class="dash-header-icon">⚡</span>
-            </div>
-            <div class="dash-grid">
-                <div class="dash-item">
-                    <span class="dash-item-label">Model</span>
-                    <span class="dash-item-value accent">{last_model}</span>
-                </div>
-                <div class="dash-item">
-                    <span class="dash-item-label">Latency</span>
-                    <span class="dash-item-value">{last_latency:.0f}ms</span>
-                </div>
-                <div class="dash-item">
-                    <span class="dash-item-label">Cost</span>
-                    <span class="dash-item-value">${last_cost:.6f}</span>
-                </div>
-                <div class="dash-item">
-                    <span class="dash-item-label">Complexity</span>
-                    <span class="dash-item-value">{last_complexity}</span>
-                </div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
 
 def hero():
+    """Render the landing page hero section (logo, title, tagline)."""
     st.markdown(
         """
         <div class="hero-wrap">
@@ -112,6 +91,7 @@ def hero():
 
 
 def view_header(icon: str, title: str, subtitle: str):
+    """Render a standard page header with icon, title, and subtitle."""
     st.markdown(
         f"""
         <div class="view-header">
@@ -127,15 +107,18 @@ def view_header(icon: str, title: str, subtitle: str):
 
 
 def glass_card(title: str = "", icon: str = ""):
+    """Open a glass-card container with optional title. Must be closed with glass_card_close()."""
     t = f'<div class="glass-card-title">{icon} {title}</div>' if title else ""
     st.markdown(f'<div class="glass-card">{t}', unsafe_allow_html=True)
 
 
 def glass_card_close():
+    """Close a glass-card container opened with glass_card()."""
     st.markdown("</div>", unsafe_allow_html=True)
 
 
 def resume_card(filename: str):
+    """Render a card showing the uploaded resume filename and status."""
     st.markdown(
         f"""
         <div class="resume-card">
@@ -150,25 +133,15 @@ def resume_card(filename: str):
     )
 
 
-def question_card(num: int, total: int, text: str):
-    st.markdown(
-        f"""
-        <div class="interview-card">
-            <div class="interview-q-badge">Question {num} of {total}</div>
-            <div class="interview-q-text">{text}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def feedback_card(md: str):
+    """Render a feedback card containing markdown content."""
     st.markdown('<div class="feedback-card">', unsafe_allow_html=True)
     st.markdown(md)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
 def success_box(title: str, subtitle: str = ""):
+    """Render a success/celebration box with optional subtitle."""
     s = f'<div class="success-box-sub">{subtitle}</div>' if subtitle else ""
     st.markdown(
         f"""
@@ -180,3 +153,90 @@ def success_box(title: str, subtitle: str = ""):
         """,
         unsafe_allow_html=True,
     )
+
+
+def show_db_setup_message(missing: list = None, error: str = None):
+    """Display instructions for initializing Supabase tables when check_tables() fails."""
+    st.markdown(
+        """
+        <div class="auth-hero">
+            <div class="auth-logo">🤖</div>
+            <div class="auth-title">AI Placement <span>Mentor</span></div>
+            <div class="auth-sub">Database not initialized</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if missing:
+        table_list = "\n\n".join(f"* `{t}`" for t in missing)
+        st.error(
+            f"**Missing database tables:**\n\n{table_list}\n\n"
+            "Please run the SQL schema in your Supabase SQL Editor."
+        )
+    elif error:
+        st.error(f"**Database check failed:**\n\n```\n{error}\n```")
+    else:
+        st.warning(
+            "Supabase tables are missing. Please run the SQL schema in your Supabase SQL Editor:\n\n"
+            "1. Go to https://supabase.com/dashboard\n"
+            "2. Open your project → **SQL Editor**\n"
+            "3. Copy and paste the content of **sql_schema.sql**\n"
+            "4. Click **Run**\n\n"
+            "After running the schema, refresh this page."
+        )
+    if st.button("\U0001f504 Refresh", use_container_width=True, type="primary"):
+        st.rerun()
+
+
+def show_auth_ui():
+    """Render the sign-in / sign-up tabbed form for unauthenticated users."""
+    st.markdown(
+        """
+        <div class="auth-hero">
+            <div class="auth-logo">🤖</div>
+            <div class="auth-title">AI Placement <span>Mentor</span></div>
+            <div class="auth-sub">Sign in to continue your career journey</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
+
+    with tab1:
+        with st.form("signin_form", clear_on_submit=False):
+            email = st.text_input("Email", key="signin_email", placeholder="your@email.com")
+            password = st.text_input("Password", type="password", key="signin_password", placeholder="Enter your password")
+            submitted = st.form_submit_button("Sign In", use_container_width=True, type="primary")
+            if submitted:
+                if not email or not password:
+                    st.error("Please fill in all fields.")
+                else:
+                    from auth import sign_in
+                    ok, msg = sign_in(email, password)
+                    if ok:
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+    with tab2:
+        with st.form("signup_form", clear_on_submit=False):
+            email = st.text_input("Email", key="signup_email", placeholder="your@email.com")
+            password = st.text_input("Password", type="password", key="signup_password", placeholder="At least 6 characters")
+            confirm = st.text_input("Confirm Password", type="password", key="signup_confirm", placeholder="Repeat your password")
+            submitted = st.form_submit_button("Create Account", use_container_width=True, type="primary")
+            if submitted:
+                if not email or not password or not confirm:
+                    st.error("Please fill in all fields.")
+                elif password != confirm:
+                    st.error("Passwords do not match.")
+                elif len(password) < 6:
+                    st.error("Password must be at least 6 characters.")
+                else:
+                    from auth import sign_up
+                    ok, msg = sign_up(email, password)
+                    if ok:
+                        st.success("Account created! You are now signed in.")
+                        st.rerun()
+                    else:
+                        st.error(msg)

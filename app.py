@@ -1,22 +1,63 @@
+"""Main Streamlit application — all views, navigation, streaming, and state management."""
+
 import streamlit as st
 import streamlit.components.v1 as components
 import time
-import uuid
 import json
-from datetime import datetime, date, timedelta
+import concurrent.futures
+import markdown as _md_lib
+from datetime import datetime, date, timedelta, timezone
 
-from memory import save_interview_report
+# ── Timing utility ──
+_t_start_run = time.perf_counter()
+_t_log: list[tuple[str, float]] = []
+
+def _t(label: str):
+    """Record a timing checkpoint with the given label."""
+    _t_log.append((label, time.perf_counter()))
+
+def _t_report():
+    """Print a per-rerun timing report to the terminal."""
+    total = time.perf_counter() - _t_start_run
+    print(f"\n{'='*65}")
+    print(f"  PERF REPORT (all times ms)")
+    print(f"{'='*65}")
+    prev = _t_start_run
+    for label, t in _t_log:
+        elapsed = (t - prev) * 1000
+        print(f"  {label:35s} {elapsed:8.1f} ms")
+        prev = t
+    print(f"  {'TOTAL':35s} {total*1000:8.1f} ms")
+    print(f"{'='*65}\n")
+
+_db_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+from memory import save_interview_report, build_interview_memory_context
 from ai import ask_ai, analyze_resume
 from resume import extract_resume_text
 from interview import (
     generate_interview_questions,
+    generate_interview_questions_with_memory,
     evaluate_answer,
+    evaluate_answer_with_memory,
     generate_final_report,
+    generate_structured_report,
 )
-from career import recommend_career
+from career import recommend_career, recommend_career_standalone, generate_learning_roadmap
 
 import ui
-import chat_store
+import auth
+import chat as chat_db
+import database
+import assessment
+
+
+def _db_failed():
+    """Reset cached DB and profile flags so they are re-checked on next rerun."""
+    st.session_state.pop("_db_ok", None)
+    st.session_state.pop("_db_missing", None)
+    st.session_state.pop("_profile_ensured", None)
+
 
 st.set_page_config(
     page_title="AI Placement Mentor",
@@ -25,13 +66,95 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+_t("set_page_config")
+
+# ── CSS: injected every rerun (Streamlit rebuilds the DOM) ──
 ui.load_css("styles.css")
+_t("load_css")
 
 # --- theme state ---
 if "theme" not in st.session_state:
     params = st.query_params
     t = params.get("t", "dark")
     st.session_state.theme = t if t in ("light", "dark") else "dark"
+_t("theme_state")
+
+# =============================================================
+# AUTH CHECK — unauthenticated users see login/signup only
+# =============================================================
+if not auth.is_authenticated():
+    _t("auth_ui")
+    ui.show_auth_ui()
+    _t("auth_ui_done")
+    st.stop()
+_t("auth_check")
+
+# =============================================================
+# AUTHENTICATED — main application below
+# =============================================================
+user = auth.get_current_user()
+user_id = user["id"]
+_t("user_setup")
+
+# ── DB Health Check (cache after first success) ──
+if "_db_ok" not in st.session_state:
+    try:
+        db_ok_result, db_missing_list = database.check_tables()
+        st.session_state._db_ok = db_ok_result
+        st.session_state._db_missing = db_missing_list
+        st.session_state._db_error = None
+    except Exception as e:
+        st.session_state._db_ok = False
+        st.session_state._db_missing = []
+        st.session_state._db_error = str(e)
+if not st.session_state._db_ok:
+    ui.show_db_setup_message(
+        missing=st.session_state.get("_db_missing"),
+        error=st.session_state.get("_db_error"),
+    )
+    st.stop()
+_t("db_health_check")
+
+# ── Ensure profile exists (cache after first success) ──
+print(f"DEBUG _profile_ensured: in_session={'_profile_ensured' in st.session_state}, value={st.session_state.get('_profile_ensured', 'MISSING')}")
+if "_profile_ensured" not in st.session_state:
+    profile_ok = database.ensure_profile(user_id, user.get("email", ""))
+    st.session_state._profile_ensured = profile_ok
+    print(f"DEBUG _profile_ensured: AFTER ensure_profile -> result={profile_ok}, cached={'_profile_ensured' in st.session_state}")
+_t("ensure_profile")
+
+# --- Warm up AI provider on startup (not at import time) ---
+import ai as ai_module
+_t("import_ai")
+if not ai_module.is_ready() and not st.session_state.get("_warmup_attempted"):
+    st.session_state._warmup_attempted = True
+    with st.status("Initializing AI...", expanded=True) as s:
+        st.write("Connecting to AI provider...")
+        ok = ai_module.warmup_ai()
+        if ok:
+            s.update(label="AI Ready", state="complete", expanded=False)
+        else:
+            err = ai_module.get_warmup_error()
+            s.update(label=f"AI initialization failed: {err}", state="error")
+    _t("ai_warmup")
+    st.rerun()
+
+# Show warmup error banner if initialization failed but we've already attempted
+if not ai_module.is_ready() and st.session_state.get("_warmup_attempted"):
+    err = ai_module.get_warmup_error()
+    if err:
+        st.warning(f"⚠️ **AI service unavailable:** {err}")
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("🔄 Retry AI Initialization", use_container_width=True):
+                st.session_state._warmup_attempted = False
+                st.session_state.pop("ai_ready", None)
+                st.rerun()
+        with col2:
+            if st.button("⏩ Continue Anyway", use_container_width=True):
+                st.session_state._ai_continue = True
+                st.rerun()
+_t("warmup_check")
 
 # --- Top bar (pure HTML buttons, JS injected via iframe) ---
 cur_theme = st.session_state.theme
@@ -43,7 +166,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# --- JS via same-origin iframe (not stripped by Streamlit) ---
+# --- JS via same-origin iframe (injected every rerun — DOM is rebuilt) ---
 components.html(f"""
 <script>
 (function() {{
@@ -77,22 +200,44 @@ components.html(f"""
     this.textContent = n3 === 'dark' ? '\\u{{1F319}}' : '\\u{{2600}}\\u{{FE0F}}';
     try {{ w.localStorage.setItem('apm_theme', n3); }} catch(ex) {{}}
   }}; }}
+  // Mobile: close sidebar when tapping outside
+  if (!w.__apmMobileClose) {{
+    w.__apmMobileClose = true;
+    doc.addEventListener('click', function(e) {{
+      if (w.innerWidth > 768) return;
+      var s = doc.querySelector('[data-testid="stSidebar"]');
+      var h = doc.getElementById('hamburger-btn');
+      if (!s || !h) return;
+      if (doc.documentElement.getAttribute('data-sidebar-open') !== 'true') return;
+      if (s.contains(e.target) || h.contains(e.target)) return;
+      doc.documentElement.setAttribute('data-sidebar-open', 'false');
+      try {{ w.localStorage.setItem('apm_sidebar', 'false'); }} catch(ex) {{}}
+    }});
+  }}
+  // Clean up footer from previous render (chat view recreates if needed)
+  var _cf = doc.getElementById('_cfooter_done');
+  if (_cf) _cf.remove();
+  var _cb = doc.querySelector('[data-testid="stBottom"]');
+  if (_cb) _cb.style.paddingBottom = '';
 }})();
 </script>
 """, height=0)
+_t("top_bar_and_js")
 
-# --- session state ---
+# --- session state (fast: only runs for missing keys) ---
 for key in [
     "messages", "interview_started", "interview_questions",
     "interview_finished", "current_question", "feedback",
     "answer_submitted", "interview_results", "career_report",
     "show_uploader", "resume_filename", "resume_analysis",
+    "_awaiting_response", "chat_started",
 ]:
     if key not in st.session_state:
         st.session_state[key] = [] if key in [
             "messages", "interview_questions", "interview_results"
         ] else (False if key in [
-            "interview_started", "interview_finished", "answer_submitted", "show_uploader"
+            "interview_started", "interview_finished", "answer_submitted", "show_uploader",
+            "_awaiting_response", "chat_started",
         ] else (""))
 
 if "resume_analysis" in st.session_state and st.session_state.resume_analysis is None:
@@ -103,27 +248,37 @@ if "resume_filename" in st.session_state and st.session_state.resume_filename is
 
 if "current_view" not in st.session_state:
     st.session_state.current_view = "chat"
+_t("session_state_init")
 
-# --- chat state ---
+# --- chat state (loaded from Supabase) ---
+_t("chat_state_start")
 if "chats" not in st.session_state:
-    st.session_state.chats = chat_store.load_chats()
-    if not st.session_state.chats:
-        cid = str(uuid.uuid4())
-        now = datetime.now().isoformat()
-        st.session_state.chats[cid] = {
-            "id": cid, "title": "New Chat",
-            "created_at": now, "updated_at": now,
-            "pinned": False, "messages": [],
-        }
+    st.session_state.chats = chat_db.load_chats(user_id)
+    _t("load_chats")
 
 if "current_chat_id" not in st.session_state:
-    sorted_chats = sorted(
-        st.session_state.chats.items(),
-        key=lambda x: x[1].get("updated_at", x[1]["created_at"]),
-        reverse=True,
-    )
-    st.session_state.current_chat_id = sorted_chats[0][0]
-    st.session_state.messages = list(sorted_chats[0][1]["messages"])
+    if st.session_state.chats:
+        sorted_chats = sorted(
+            st.session_state.chats.items(),
+            key=lambda x: x[1].get("updated_at", x[1]["created_at"]),
+            reverse=True,
+        )
+        st.session_state.current_chat_id = sorted_chats[0][0]
+        st.session_state.messages = chat_db.load_messages(sorted_chats[0][0])
+        st.session_state.chat_started = bool(st.session_state.messages)
+        st.session_state.chats[sorted_chats[0][0]]["messages"] = list(st.session_state.messages)
+        _t("load_messages")
+    else:
+        _cid = chat_db.create_chat(user_id)
+        _now = datetime.now().isoformat()
+        st.session_state.chats[_cid] = {
+            "id": _cid, "title": "New Chat",
+            "created_at": _now, "updated_at": _now,
+            "pinned": False, "messages": [],
+        }
+        st.session_state.current_chat_id = _cid
+        st.session_state.messages = []
+        _t("create_first_chat")
 
 if "chat_search" not in st.session_state:
     st.session_state.chat_search = ""
@@ -132,9 +287,23 @@ if "rename_chat_id" not in st.session_state:
 if "delete_chat_id" not in st.session_state:
     st.session_state.delete_chat_id = None
 
-# --- chat functions ---
+# Ensure current_chat_id exists in chats dict
+if st.session_state.current_chat_id is not None and st.session_state.current_chat_id not in st.session_state.chats:
+    if st.session_state.chats:
+        sorted_c = sorted(
+            st.session_state.chats.items(),
+            key=lambda x: x[1].get("updated_at", x[1]["created_at"]), reverse=True,
+        )
+        st.session_state.current_chat_id = sorted_c[0][0]
+        st.session_state.messages = chat_db.load_messages(sorted_c[0][0])
+    else:
+        st.session_state.current_chat_id = None
+        st.session_state.messages = []
+
+# --- chat functions (Supabase-backed) ---
 def _new_chat():
-    cid = str(uuid.uuid4())
+    """Create a new chat in Supabase and set it as the active conversation."""
+    cid = chat_db.create_chat(user_id)
     now = datetime.now().isoformat()
     st.session_state.chats[cid] = {
         "id": cid, "title": "New Chat",
@@ -143,15 +312,19 @@ def _new_chat():
     }
     st.session_state.current_chat_id = cid
     st.session_state.messages = []
-    chat_store.save_chats(st.session_state.chats)
+    st.session_state.chat_started = False
 
 def _select_chat(cid):
+    """Switch to an existing chat and load its messages from Supabase."""
     st.session_state.current_chat_id = cid
-    chat = st.session_state.chats.get(cid)
-    if chat:
-        st.session_state.messages = list(chat["messages"])
+    st.session_state.messages = chat_db.load_messages(cid)
+    st.session_state.chat_started = bool(st.session_state.messages)
+    if cid in st.session_state.chats:
+        st.session_state.chats[cid]["messages"] = list(st.session_state.messages)
 
 def _delete_chat(cid):
+    """Delete a chat from Supabase and remove it from session state; fall back to next chat or create new."""
+    chat_db.delete_chat(cid, user_id)
     if cid in st.session_state.chats:
         del st.session_state.chats[cid]
     if st.session_state.current_chat_id == cid:
@@ -163,61 +336,62 @@ def _delete_chat(cid):
             _select_chat(sorted_c[0][0])
         else:
             _new_chat()
-    chat_store.save_chats(st.session_state.chats)
 
 def _toggle_pin(cid):
+    """Toggle the pinned status of a chat, syncing to Supabase."""
     if cid in st.session_state.chats:
         st.session_state.chats[cid]["pinned"] = not st.session_state.chats[cid]["pinned"]
         st.session_state.chats[cid]["updated_at"] = datetime.now().isoformat()
-    chat_store.save_chats(st.session_state.chats)
+    if not chat_db.update_chat(cid, user_id, {"pinned": st.session_state.chats[cid]["pinned"]}):
+        _db_failed()
 
 def _rename_chat(cid, title):
+    """Rename a chat in session state and sync to Supabase."""
     if cid in st.session_state.chats:
         st.session_state.chats[cid]["title"] = title
         st.session_state.chats[cid]["updated_at"] = datetime.now().isoformat()
-    chat_store.save_chats(st.session_state.chats)
+    if not chat_db.update_chat(cid, user_id, {"title": title}):
+        _db_failed()
 
 def _duplicate_chat(cid):
+    """Create a copy of a chat (title + messages) in Supabase and session state."""
     chat = st.session_state.chats[cid]
-    new_id = str(uuid.uuid4())
+    new_id = chat_db.create_chat(user_id, chat["title"] + " (Copy)")
     now = datetime.now().isoformat()
+    for msg in chat.get("messages", []):
+        if not chat_db.save_message(new_id, user_id, msg["role"], msg["content"], msg.get("timestamp", "")):
+            _db_failed()
     st.session_state.chats[new_id] = {
         "id": new_id, "title": chat["title"] + " (Copy)",
         "created_at": now, "updated_at": now,
-        "pinned": False, "messages": list(chat["messages"]),
+        "pinned": False, "messages": list(chat.get("messages", [])),
     }
-    chat_store.save_chats(st.session_state.chats)
+
+def open_chat(chat_id=None, is_new=False):
+    """Switch to Chat view and select or create a conversation."""
+    _sync_current_chat()
+    if is_new:
+        _new_chat()
+    elif chat_id:
+        _select_chat(chat_id)
+    st.session_state.current_view = "chat"
+    st.session_state._awaiting_response = False
 
 def _generate_chat_title(msg):
+    """Truncate first user message to ≤40 chars for use as the chat title."""
     msg = msg.strip().replace("\n", " ")
     if len(msg) > 40:
         return msg[:40] + "..."
     return msg
 
-def _split_markdown_blocks(text):
-    blocks = []
-    current = []
-    in_code = False
-    for line in text.split("\n"):
-        if line.strip().startswith("```"):
-            in_code = not in_code
-            current.append(line)
-        elif in_code:
-            current.append(line)
-        elif line.strip() == "":
-            if current:
-                blocks.append("\n".join(current))
-                current = []
-        else:
-            current.append(line)
-    if current:
-        blocks.append("\n".join(current))
-    return blocks
-
 def _sync_current_chat():
-    if st.session_state.current_chat_id and st.session_state.current_chat_id in st.session_state.chats:
-        st.session_state.chats[st.session_state.current_chat_id]["messages"] = list(st.session_state.messages)
-        st.session_state.chats[st.session_state.current_chat_id]["updated_at"] = datetime.now().isoformat()
+    """Sync the current chat's messages and updated_at timestamp to Supabase."""
+    cid = st.session_state.current_chat_id
+    if cid and cid in st.session_state.chats:
+        st.session_state.chats[cid]["messages"] = list(st.session_state.messages)
+        st.session_state.chats[cid]["updated_at"] = datetime.now().isoformat()
+        if not chat_db.sync_chat(cid, user_id):
+            _db_failed()
 
 def _render_chat_list():
     chats = st.session_state.chats
@@ -302,8 +476,7 @@ def _render_chat_list():
                 sel = "\u25c0 " if active else ""
                 btn_label = f"{sel}{title}"
                 if st.button(btn_label, key=f"cht_{cid}", use_container_width=True):
-                    _sync_current_chat()
-                    _select_chat(cid)
+                    open_chat(chat_id=cid)
                     st.rerun()
             with cols[1]:
                 star = "\u2b50" if chat.get("pinned") else "\u2606"
@@ -327,13 +500,13 @@ def _render_chat_list():
 
 # --- sidebar ---
 with st.sidebar:
+    _t("sidebar_start")
     ui.sidebar_header()
 
     # + New Chat
     st.markdown('<div class="new-chat-btn">', unsafe_allow_html=True)
     if st.button("+ New Chat", use_container_width=True, type="primary", key="new_chat_btn"):
-        _sync_current_chat()
-        _new_chat()
+        open_chat(is_new=True)
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -343,30 +516,34 @@ with st.sidebar:
     # Scrollable chat list
     st.markdown('<div class="chat-list-scroll">', unsafe_allow_html=True)
     _render_chat_list()
+    _t("sidebar_chat_list")
     st.markdown("</div>", unsafe_allow_html=True)
 
     interview_st = "Running" if st.session_state.interview_started else "Not Started"
     if st.session_state.interview_finished:
         interview_st = "Completed"
+    _t("sidebar_dashboard_start")
     ui.dashboard(
         total_chats=len(st.session_state.messages),
         resume_status="Uploaded" if "resume_text" in st.session_state else "Not Uploaded",
         interview_status=interview_st,
         memory_status="Enabled",
-        last_model=st.session_state.get("last_model"),
-        last_latency=st.session_state.get("last_latency"),
-        last_cost=st.session_state.get("last_cost"),
-        last_complexity=st.session_state.get("last_complexity"),
     )
+    _t("sidebar_dashboard_done")
 
+    _t("sidebar_nav_start")
     st.markdown('<div class="sidebar-heading">Views</div>', unsafe_allow_html=True)
 
     cur = st.session_state.current_view
     for vid, vicon, vlabel in [
+        ("dashboard", "\U0001f4ca", "Dashboard"),
         ("chat", "\U0001f4ac", "Chat"),
         ("resume", "\U0001f4c4", "Resume Analyzer"),
         ("interview", "\U0001f3a4", "Mock Interview"),
         ("career", "\U0001f3af", "Career"),
+        ("history", "\U0001f4ca", "History"),
+        ("weaknesses", "\U0001f6a9", "Weaknesses"),
+        ("roadmap", "\U0001f9ed", "Roadmap"),
     ]:
         cls = "nav-btn-active" if cur == vid else ""
         st.markdown(f'<div class="{cls}">', unsafe_allow_html=True)
@@ -375,8 +552,17 @@ with st.sidebar:
             st.session_state.current_view = vid
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
+    _t("sidebar_nav_done")
 
     st.divider()
+
+    # Logout button
+    st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
+    if st.button("\U0001f6aa Sign Out", use_container_width=True):
+        _sync_current_chat()
+        auth.sign_out()
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="clear-btn">', unsafe_allow_html=True)
     if st.button("\U0001f5d1\ufe0f Clear Chat", use_container_width=True):
@@ -384,11 +570,159 @@ with st.sidebar:
         if st.session_state.current_chat_id and st.session_state.current_chat_id in st.session_state.chats:
             st.session_state.chats[st.session_state.current_chat_id]["messages"] = []
             st.session_state.chats[st.session_state.current_chat_id]["updated_at"] = datetime.now().isoformat()
-            chat_store.save_chats(st.session_state.chats)
+            if not chat_db.sync_chat(st.session_state.current_chat_id, user_id):
+                _db_failed()
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
+    _t("sidebar_end")
 
-# --- keyboard shortcuts (client-side) ---
+# --- markdown renderer ---
+def _md(text: str) -> str:
+    """Render Markdown to HTML with fenced code, tables, and line-break extensions."""
+    return _md_lib.markdown(text, extensions=["fenced_code", "tables", "nl2br"])
+
+
+# --- weakness category mapping ---
+WEAKNESS_CATEGORY_KEYWORDS = [
+    ("DSA", ["dsa", "algorithm", "data structure", "tree", "graph", "sorting", "searching", "array", "linked list", "stack", "queue", "dp", "dynamic programming", "recursion", "binary", "complexity"]),
+    ("OOP", ["oop", "object-oriented", "object oriented", "inheritance", "polymorphism", "encapsulation", "abstraction", "class", "object design"]),
+    ("DBMS", ["dbms", "database", "sql", "query", "normalization", "indexing", "transaction", "acid", "join", "schema", "erd"]),
+    ("Operating Systems", ["operating system", "os ", "process", "thread", "memory management", "scheduling", "file system", "deadlock", "semaphore", "mutex", "paging", "segmentation"]),
+    ("Computer Networks", ["network", "computer network", "tcp", "ip ", "http", "dns", "routing", "protocol", "socket", "osi", "nat"]),
+    ("Aptitude", ["aptitude", "logical", "quantitative", "verbal", "numerical", "reasoning"]),
+    ("Projects", ["project", "portfolio", "github", "resume project"]),
+    ("Communication", ["communication", "presentation", "speaking", "articulate", "explain", "soft skill"]),
+    ("Problem Solving", ["problem solving", "problem-solving", "critical thinking", "analytical", "logic", "approach"]),
+]
+
+
+def _map_weakness_category(text: str) -> str:
+    """Map a weakness text to a predefined category based on keyword matching."""
+    tl = text.lower()
+    for cat, kws in WEAKNESS_CATEGORY_KEYWORDS:
+        if any(kw in tl for kw in kws):
+            print(f"[WEAKNESS MAP] '{text[:40]}' -> {cat}")
+            return cat
+    print(f"[WEAKNESS MAP] '{text[:40]}' -> General (unmapped)")
+    return "General"
+
+
+# --- metadata bar helper ---
+def _meta_bar(metadata: dict) -> str:
+    """Build a compact metadata line for an assistant response. Omitted fields when unavailable."""
+    parts = ["CascadeFlow", "Groq"]
+    model = metadata.get("model", "")
+    if model:
+        parts.append(model)
+    latency = metadata.get("latency", 0)
+    if latency:
+        parts.append(f"{latency/1000:.2f}s")
+    cost = metadata.get("cost", 0)
+    if cost and cost > 0:
+        if cost < 0.001:
+            parts.append(f"${cost:.6f}")
+        else:
+            parts.append(f"${cost:.5f}")
+    return " • ".join(parts)
+
+
+# --- custom message renderer (no st.chat_message) ---
+def _render_message_html(msg: dict) -> str:
+    """Build the HTML for a single chat message (user or assistant bubble with avatar, timestamp, actions)."""
+    role = msg["role"]
+    avatar = "\U0001f642" if role == "user" else "\U0001f916"
+    content = _md(msg.get("content", ""))
+    ts = msg.get("timestamp", "")
+    ts_html = f'<span class="msg-time">{ts}</span>' if ts else ""
+
+    user_actions = (
+        '<span class="msg-actions">'
+        '<button class="msg-action-btn" title="Edit">\u270f\ufe0f</button>'
+        '<button class="msg-action-btn" title="Delete">\U0001f5d1\ufe0f</button>'
+        "</span>"
+    )
+    assistant_actions = (
+        '<span class="msg-actions">'
+        '<button class="msg-action-btn" title="Copy">\U0001f4cb</button>'
+        '<button class="msg-action-btn" title="Regenerate">\U0001f504</button>'
+        '<button class="msg-action-btn" title="Like">\U0001f44d</button>'
+        '<button class="msg-action-btn" title="Dislike">\U0001f44e</button>'
+        "</span>"
+    )
+    actions = user_actions if role == "user" else assistant_actions
+
+    meta = ""
+    if role == "assistant":
+        m = msg.get("metadata")
+        if m:
+            meta = f'<div class="msg-meta">{_meta_bar(m)}</div>'
+
+    return (
+        f'<div class="message {role}">'
+        f'{meta}'
+        f'<div class="msg-row">'
+        f'<div class="bubble">{content}</div>'
+        f'<div class="avatar">{avatar}</div>'
+        f"</div>"
+        f'<div class="footer-row">'
+        f"{ts_html}{actions}"
+        f"</div>"
+        f"</div>"
+    )
+
+
+# --- timestamp helper ---
+def _make_timestamp() -> str:
+    """Return a formatted local timestamp (e.g. 'Jun 28, 02:30 PM')."""
+    dt = datetime.now(timezone.utc).astimezone()
+    return dt.strftime("%b %d, %I:%M %p")
+
+
+def _generate_pdf_report(data: dict) -> bytes:
+    """Generate a PDF byte-string from an interview report data dict using fpdf2."""
+    try:
+        from fpdf import FPDF
+        import io
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 18)
+        pdf.cell(0, 14, "Interview Report", ln=True, align="C")
+        pdf.ln(8)
+
+        pdf.set_font("Helvetica", "", 11)
+        def row(label, val):
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.cell(50, 8, label, ln=False)
+            pdf.set_font("Helvetica", "", 11)
+            pdf.cell(0, 8, str(val), ln=True)
+
+        row("Overall Score", f"{data.get('overall_score', 'N/A')}/10")
+        row("Technical Score", f"{data.get('technical_score', 'N/A')}/10")
+        row("Communication Score", f"{data.get('communication_score', 'N/A')}/10")
+        row("Confidence Score", f"{data.get('confidence_score', 'N/A')}/10")
+        row("Hiring Recommendation", data.get("hiring_recommendation", "N/A"))
+        pdf.ln(6)
+
+        for label, key in [
+            ("Strengths", "strengths"),
+            ("Weaknesses", "weaknesses"),
+            ("Improvement Suggestions", "improvement_suggestions"),
+            ("Recommended Topics", "recommended_topics"),
+        ]:
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.cell(0, 10, label, ln=True)
+            pdf.set_font("Helvetica", "", 11)
+            pdf.multi_cell(0, 6, data.get(key, ""))
+            pdf.ln(3)
+
+        buf = io.BytesIO()
+        pdf.output(buf)
+        return buf.getvalue()
+    except Exception:
+        return b""
+
+
+# --- keyboard shortcuts (injected every rerun — DOM is rebuilt) ---
 st.markdown(f'''
 <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
      onload="if(!window.__apmKS){{window.__apmKS=true;
@@ -405,123 +739,334 @@ try{{window.__apmCC=\'{st.session_state.current_chat_id}\';}}catch(ex){{}}
 ''', unsafe_allow_html=True)
 
 # =============================================================
-# CHAT VIEW — Instagram DM Style
+# DASHBOARD VIEW
 # =============================================================
-if st.session_state.current_view == "chat":
+if st.session_state.current_view == "dashboard":
+    _t("dashboard_view")
 
-    if len(st.session_state.messages) == 0:
-        st.markdown('<div class="home-center">', unsafe_allow_html=True)
-        ui.hero()
-        st.markdown('</div>', unsafe_allow_html=True)
+    ui.view_header(
+        "\U0001f4ca", "Your Progress Dashboard",
+        "Overview of your interview performance, weaknesses, and learning activity."
+    )
 
-    now_ts = datetime.now().strftime("%I:%M %p")
+    reports = database.get_interview_reports(user_id)
+    weaknesses = database.get_user_weaknesses(user_id)
+    careers = database.get_career_recommendations(user_id)
+    roadmaps = database.get_learning_roadmaps(user_id)
+    chat_history = chat_db.load_chats(user_id)
 
-    for m in st.session_state.messages:
-        ts = m.get("timestamp", "")
-        with st.chat_message(m["role"], avatar="🤖" if m["role"] == "assistant" else "🙂"):
-            st.markdown(m["content"])
-            if ts:
-                st.markdown(f'<div class="msg-time">{ts}</div>', unsafe_allow_html=True)
-            if m["role"] == "assistant":
-                st.markdown(
-                    '<div class="msg-actions">'
-                    '<button class="msg-action-btn" title="Copy">\U0001f4cb</button>'
-                    '<button class="msg-action-btn" title="Regenerate">\U0001f504</button>'
-                    '<button class="msg-action-btn" title="Like">\U0001f44d</button>'
-                    '<button class="msg-action-btn" title="Dislike">\U0001f44e</button>'
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    '<div class="msg-actions">'
-                    '<button class="msg-action-btn" title="Edit">\u270f\ufe0f</button>'
-                    '<button class="msg-action-btn" title="Delete">\U0001f5d1\ufe0f</button>'
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
+    total_interviews = len(reports)
+    total_weaknesses = len(weaknesses)
+    resolved_weaknesses = sum(1 for w in weaknesses if w["status"] == "resolved")
+    total_careers = len(careers)
+    total_roadmaps = len(roadmaps)
+    total_chats = len(chat_history)
 
-    prompt = st.chat_input("Message\u2026")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Interviews", total_interviews)
+    with col2:
+        st.metric("Weaknesses Tracked", total_weaknesses)
+    with col3:
+        st.metric("Resolved", resolved_weaknesses)
+    with col4:
+        st.metric("Roadmaps Created", total_roadmaps)
 
-    if prompt:
-        now = datetime.now().strftime("%I:%M %p")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Career Recommendations", total_careers)
+    with col2:
+        st.metric("Chat Sessions", total_chats)
+    with col3:
+        if reports:
+            avg_score = sum(float(r.get("overall_score", 0) or 0) for r in reports) / total_interviews
+            st.metric("Avg Overall Score", f"{avg_score:.1f}/10")
+        else:
+            st.metric("Avg Overall Score", "N/A")
 
-        # Add user message with timestamp
-        st.session_state.messages.append({"role": "user", "content": prompt, "timestamp": now})
+    # ── Assessment Section ──
+    parsed = assessment.parse_resume_analysis(st.session_state.get("resume_analysis", ""))
+    assess = assessment.get_assessment(parsed, reports, weaknesses)
 
-        # Auto-title from first user message
-        chat = st.session_state.chats.get(st.session_state.current_chat_id)
-        if chat and chat["title"] == "New Chat" and len(chat["messages"]) == 0:
-            chat["title"] = _generate_chat_title(prompt)
-            chat_store.save_chats(st.session_state.chats)
+    with st.expander("\U0001f9d0 Assessment & Insights", expanded=True):
+        st.caption(assess["source_label"])
+        if assess["notice"]:
+            st.info(assess["notice"])
 
-        _sync_current_chat()
-        chat_store.save_chats(st.session_state.chats)
-
-        # Show user message immediately
-        with st.chat_message("user", avatar="🙂"):
-            st.markdown(prompt)
-            st.markdown(f'<div class="msg-time">{now}</div>', unsafe_allow_html=True)
-            st.markdown(
-                '<div class="msg-actions">'
-                '<button class="msg-action-btn" title="Edit">\u270f\ufe0f</button>'
-                '<button class="msg-action-btn" title="Delete">\U0001f5d1\ufe0f</button>'
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-        # Show typing indicator
-        typing_ph = st.empty()
-        with typing_ph:
-            with st.chat_message("assistant", avatar="🤖"):
-                st.markdown(
-                    '<div class="typing-indicator">'
-                    "AI is typing"
-                    '<span class="typing-dots">'
-                    "<span>.</span><span>.</span><span>.</span>"
-                    "</span>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-
-        answer, info = ask_ai(prompt)
-        for k in ["model", "latency", "cost", "routing", "complexity"]:
-            st.session_state[f"last_{k}"] = info[k]
-
-        # Replace typing indicator with actual response
-        typing_ph.empty()
-        with st.chat_message("assistant", avatar="🤖"):
-            ph = st.empty()
-            words = answer.split()
-            partial = ""
-            for j, w in enumerate(words):
-                partial += w + " "
-                if j < len(words) - 1:
-                    ph.markdown(partial + '<span class="typing-cursor">\u258c</span>', unsafe_allow_html=True)
+        if not assess["has_resume"] and not reports:
+            st.markdown("Upload a resume and complete a mock interview to see your assessment here.")
+        else:
+            cols = st.columns(3)
+            with cols[0]:
+                st.metric("Estimated Readiness", assess.get("readiness", "Unknown"))
+            with cols[1]:
+                if reports:
+                    st.metric("Avg Overall", f'{assess.get("average_score", "N/A")}/10')
                 else:
-                    ph.markdown(partial)
-                time.sleep(0.018)
+                    st.metric("ATS Score", f'{parsed.get("ats_score", "N/A")}/100')
+            with cols[2]:
+                st.metric("Weaknesses Identified", len(assess.get("weak_areas", [])))
 
-            now = datetime.now().strftime("%I:%M %p")
-            st.markdown(f'<div class="msg-time">{now}</div>', unsafe_allow_html=True)
-            st.markdown(
-                '<div class="msg-actions">'
-                '<button class="msg-action-btn" title="Copy">\U0001f4cb</button>'
-                '<button class="msg-action-btn" title="Regenerate">\U0001f504</button>'
-                '<button class="msg-action-btn" title="Like">\U0001f44d</button>'
-                '<button class="msg-action-btn" title="Dislike">\U0001f44e</button>'
+            if assess.get("strengths"):
+                with st.expander("\U0001f4aa Strengths", expanded=False):
+                    for s in assess["strengths"]:
+                        count = s.get("count", 1)
+                        src = s.get("source", "")
+                        label = f"- {s['text']}" if count == 1 else f"- {s['text']} (identified {count}x in {src})"
+                        st.markdown(label)
+
+            if assess.get("weak_areas"):
+                with st.expander("\u26a0\ufe0f Areas to Improve", expanded=False):
+                    for w in assess["weak_areas"]:
+                        count = w.get("count", 1)
+                        src = w.get("source", "")
+                        conf = w.get("confidence", "")
+                        st.markdown(f"- {w['text']}  `[{conf} confidence — from {src}]`")
+
+            if assess.get("missing_skills"):
+                with st.expander("\U0001f9d7 Missing Skills", expanded=False):
+                    for s in assess["missing_skills"]:
+                        st.markdown(f"- {s}")
+
+            if reports and len(reports) >= 2 and assess.get("trends"):
+                with st.expander("\U0001f4c8 Performance Trends", expanded=False):
+                    t = assess["trends"]
+                    st.markdown(f"- **Overall:** {t.get('overall', 'N/A')} pt")
+                    st.markdown(f"- **Technical:** {t.get('technical', 'N/A')} pt")
+                    st.markdown(f"- **Communication:** {t.get('communication', 'N/A')} pt")
+                    st.markdown(f"- **Confidence:** {t.get('confidence', 'N/A')} pt")
+
+    if reports:
+        st.markdown("### \U0001f4c8 Score Trends")
+        scores = []
+        for r in reversed(reports):
+            scores.append({
+                "session": r.get("session_id", "")[:8],
+                "overall": float(r.get("overall_score", 0) or 0),
+                "technical": float(r.get("technical_score", 0) or 0),
+                "communication": float(r.get("communication_score", 0) or 0),
+                "confidence": float(r.get("confidence_score", 0) or 0),
+            })
+        if len(scores) > 1:
+            chart_data = {"Session": [], "Overall": [], "Technical": [], "Communication": [], "Confidence": []}
+            for s in scores:
+                chart_data["Session"].append(s["session"])
+                chart_data["Overall"].append(s["overall"])
+                chart_data["Technical"].append(s["technical"])
+                chart_data["Communication"].append(s["communication"])
+                chart_data["Confidence"].append(s["confidence"])
+            st.line_chart(chart_data, x="Session", y=["Overall", "Technical", "Communication", "Confidence"])
+        else:
+            st.caption("Complete at least 2 interviews to see score trends.")
+
+    st.markdown("### \U0001f680 Quick Actions")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        if st.button("\U0001f3a4 New Interview", use_container_width=True):
+            _sync_current_chat()
+            st.session_state.current_view = "interview"
+            st.rerun()
+    with col2:
+        if st.button("\U0001f6a9 View Weaknesses", use_container_width=True):
+            _sync_current_chat()
+            st.session_state.current_view = "weaknesses"
+            st.rerun()
+    with col3:
+        if st.button("\U0001f9ed Learning Roadmap", use_container_width=True):
+            _sync_current_chat()
+            st.session_state.current_view = "roadmap"
+            st.rerun()
+    with col4:
+        if st.button("\U0001f4ca History", use_container_width=True):
+            _sync_current_chat()
+            st.session_state.current_view = "history"
+            st.rerun()
+
+# =============================================================
+# CHAT VIEW — three containers: messages → typing → input
+# =============================================================
+elif st.session_state.current_view == "chat":
+
+    _t("chat_view_start")
+
+    # ── Container 1: Chat input (processed FIRST; Streamlit fixes to bottom) ──
+    prompt = st.chat_input(
+        "Message\u2026",
+        key="chat_input",
+        disabled=st.session_state.get("_awaiting_response", False),
+    )
+    _t("chat_input")
+
+    if prompt and not st.session_state.get("_awaiting_response"):
+        if st.session_state.current_chat_id is None:
+            _new_chat()
+
+        now = _make_timestamp()
+        user_msg = {"role": "user", "content": prompt, "timestamp": now}
+        st.session_state.messages.append(user_msg)
+        st.session_state.chat_started = True
+
+        # Defer DB writes — batch with assistant response after AI completes
+        st.session_state._pending_user_msg = user_msg
+
+        chat = st.session_state.chats.get(st.session_state.current_chat_id)
+        if chat and chat["title"] == "New Chat" and len([m for m in st.session_state.messages if m["role"] == "user"]) == 1:
+            chat["title"] = _generate_chat_title(prompt)
+            st.session_state._pending_title = chat["title"]
+
+        st.session_state._awaiting_response = True
+        _t("handle_prompt")
+
+    # ── Container 2: Messages (conversation history) ──
+    messages_container = st.container()
+    with messages_container:
+        if st.session_state.messages:
+            for m in st.session_state.messages:
+                st.markdown(_render_message_html(m), unsafe_allow_html=True)
+        elif not st.session_state.get("chat_started"):
+            st.markdown('<div class="home-center">', unsafe_allow_html=True)
+            ui.hero()
+            st.markdown('</div>', unsafe_allow_html=True)
+    _t("render_messages")
+
+    # ── Container 3: Typing placeholder (always exists between messages and input) ──
+    typing_ph = st.empty()
+
+    if st.session_state.get("_awaiting_response"):
+        last_user = st.session_state.messages[-1]["content"]
+
+        typing_ph.markdown(
+            '<div class="message assistant">'
+            '<div class="msg-row">'
+            '<div class="avatar">\U0001f916</div>'
+            '<div class="bubble">'
+            '<div class="typing-indicator">AI is typing'
+            '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></div>'
+            "</div>"
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        _t("ask_ai_start")
+        answer, info = ask_ai(last_user, user_id)
+        _t("ask_ai_done")
+        metadata = {
+            "model": info.get("model", ""),
+            "latency": info.get("latency", 0),
+            "cost": info.get("cost", 0),
+        }
+        meta_line = _meta_bar(metadata)
+
+        _t("streaming_start")
+        print("STREAM START")
+        words = answer.split()
+        accumulated = ""
+        for j, w in enumerate(words):
+            accumulated += w + " "
+            partial_html = _md(accumulated)
+            cursor = '<span class="typing-cursor">\u258c</span>' if j < len(words) - 1 else ""
+            typing_ph.markdown(
+                '<div class="message assistant">'
+                f'<div style="font-size:11px;color:#999;padding:2px 0 2px 12px;">{meta_line}</div>'
+                '<div class="msg-row">'
+                '<div class="avatar">\U0001f916</div>'
+                f'<div class="bubble">{partial_html}{cursor}</div>'
+                "</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
+            time.sleep(0.018)
+        print("STREAM COMPLETE")
+        _t("streaming_done")
 
-        st.session_state.messages.append({"role": "assistant", "content": answer, "timestamp": now})
-        _sync_current_chat()
-        chat_store.save_chats(st.session_state.chats)
-        st.rerun()
+        now = _make_timestamp()
+        _t("final_answer_display")
+        typing_ph.markdown(
+            '<div class="message assistant">'
+            f'<div style="font-size:11px;color:#999;padding:2px 0 2px 12px;">{meta_line}</div>'
+            '<div class="msg-row">'
+            '<div class="avatar">\U0001f916</div>'
+            f'<div class="bubble">{_md(answer)}</div>'
+            "</div>"
+            '<div class="footer-row">'
+            f'<span class="msg-time">{now}</span>'
+            '<span class="msg-actions">'
+            '<button class="msg-action-btn" title="Copy">\U0001f4cb</button>'
+            '<button class="msg-action-btn" title="Regenerate">\U0001f504</button>'
+            '<button class="msg-action-btn" title="Like">\U0001f44d</button>'
+            '<button class="msg-action-btn" title="Dislike">\U0001f44e</button>'
+            "</span>"
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
+        st.session_state.messages.append({
+            "role": "assistant", "content": answer, "timestamp": now, "metadata": metadata,
+        })
+        _t("save_batch_start")
+        pending_user = st.session_state.pop("_pending_user_msg", None)
+        pending_title = st.session_state.pop("_pending_title", None)
+        if pending_user:
+            cid = st.session_state.current_chat_id
+            asst_msg = {"role": "assistant", "content": answer, "timestamp": now}
+            f1 = _db_pool.submit(chat_db.save_messages_batch, cid, user_id, [pending_user, asst_msg])
+            if pending_title:
+                f2 = _db_pool.submit(chat_db.update_chat, cid, user_id, {"title": pending_title})
+            else:
+                f2 = _db_pool.submit(chat_db.sync_chat, cid, user_id)
+            concurrent.futures.wait([f1, f2])
+            ok = True
+            for f in [f1, f2]:
+                try:
+                    f.result()
+                except Exception:
+                    ok = False
+            if not ok:
+                _db_failed()
+        _t("save_batch_done")
+        print("MESSAGE SAVED")
+        st.session_state._awaiting_response = False
+        _t("save_streamed_response")
+
+        # Don't clear typing_ph — it holds the final answer until the next rerun
+        # renders it from st.session_state.messages in Container 2
+
+    _t("chat_footer")
+
+    # ── Render footer below chat input via JS injection ──
+    components.html(
+        """
+        <div id="_cfooter" style="display:none"></div>
+        <script>
+        (function(){
+            var d = window.parent.document;
+            if (d.getElementById('_cfooter_done')) return;
+            var el = d.createElement('div');
+            el.id = '_cfooter_done';
+            el.style.cssText = 'text-align:center;font-size:12px;color:var(--text-muted);padding:6px 0;position:fixed;bottom:0;left:0;right:0;z-index:100;pointer-events:none;background:var(--bg-primary)';
+            el.textContent = 'Powered by Groq, Hindsight, CascadeFlow';
+            d.body.appendChild(el);
+            var b = d.querySelector('[data-testid="stBottom"]');
+            if (b) b.style.paddingBottom = '28px';
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+    # ── Auto-scroll to bottom ──
     st.markdown(
-        '<p style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:4px;">'
-        "Powered by Groq, Hindsight, Cascadeflow</p>",
+        """
+        <div id="scroll-anchor"></div>
+        <script>
+        (function() {
+            var a = document.getElementById('scroll-anchor');
+            if (a) a.scrollIntoView({ behavior: 'auto', block: 'end' });
+        })();
+        </script>
+        """,
         unsafe_allow_html=True,
     )
 
@@ -529,6 +1074,7 @@ if st.session_state.current_view == "chat":
 # RESUME VIEW
 # =============================================================
 elif st.session_state.current_view == "resume":
+    _t("resume_view")
 
     ui.view_header(
         "📄", "Resume Analyzer",
@@ -554,7 +1100,7 @@ elif st.session_state.current_view == "resume":
             if text:
                 st.write("✅ Text extracted")
                 st.write("🧠 Running AI analysis...")
-                analysis = analyze_resume(text)
+                analysis = analyze_resume(text, user_id)
                 if analysis:
                     st.session_state.resume_analysis = analysis
                     st.write("✅ Analysis complete!")
@@ -609,6 +1155,7 @@ elif st.session_state.current_view == "resume":
 # INTERVIEW VIEW
 # =============================================================
 elif st.session_state.current_view == "interview":
+    _t("interview_view")
 
     ui.view_header(
         "🎤", "Mock Interview",
@@ -632,9 +1179,29 @@ elif st.session_state.current_view == "interview":
                 "Ready to practice? Start a 5-question mock interview tailored to your resume.</p>",
                 unsafe_allow_html=True,
             )
+
+            use_memory = st.checkbox(
+                "📝 Use Previous Interview Memory",
+                value=st.session_state.get("_use_interview_memory", False),
+                key="_use_interview_memory_toggle",
+                help="Include past interview performance and weaknesses to tailor questions.",
+            )
+            st.session_state._use_interview_memory = use_memory
+
+            if use_memory:
+                mem = build_interview_memory_context(user_id)
+                if mem:
+                    st.session_state._interview_memory_context = mem
+                else:
+                    st.session_state._interview_memory_context = ""
+
             if st.button("🎤 Start Mock Interview", use_container_width=True, type="primary"):
                 with st.spinner("Preparing interview questions..."):
-                    raw = generate_interview_questions(st.session_state["resume_text"])
+                    mem = st.session_state.get("_interview_memory_context", "")
+                    if mem:
+                        raw = generate_interview_questions_with_memory(st.session_state["resume_text"], mem)
+                    else:
+                        raw = generate_interview_questions(st.session_state["resume_text"])
                     st.session_state.interview_questions = [
                         q.strip() for q in raw.split("\n")
                         if q.strip() and q.strip()[0].isdigit()
@@ -713,10 +1280,16 @@ elif st.session_state.current_view == "interview":
                     if st.button("\u2705 Submit Answer", type="primary", use_container_width=True):
                         if ans.strip():
                             with st.spinner("\U0001f916 Evaluating your answer..."):
-                                fb = evaluate_answer(
-                                    qs[st.session_state.current_question], ans
-                                )
-                                save_interview_report(fb)
+                                mem = st.session_state.get("_interview_memory_context", "")
+                                if mem:
+                                    fb = evaluate_answer_with_memory(
+                                        qs[st.session_state.current_question], ans, mem
+                                    )
+                                else:
+                                    fb = evaluate_answer(
+                                        qs[st.session_state.current_question], ans
+                                    )
+                                save_interview_report(user_id, fb)
                                 st.session_state.feedback = fb
                                 st.session_state.answer_submitted = True
                             st.session_state.interview_results.append({
@@ -740,6 +1313,44 @@ elif st.session_state.current_view == "interview":
                 with st.expander("🏆 Final Interview Report", expanded=True):
                     st.markdown(st.session_state.final_report)
 
+                if "_interview_report_saved" not in st.session_state:
+                    with st.spinner("📊 Extracting scores..."):
+                        struct = generate_structured_report(st.session_state.interview_results)
+                    if struct:
+                        struct["report_text"] = st.session_state.final_report
+                        struct["session_id"] = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        if database.save_interview_report_record(user_id, struct):
+                            st.session_state._interview_report_data = struct
+                            st.session_state._interview_report_saved = True
+
+                        # ── Extract & persist weaknesses from structured report ──
+                        if struct.get("weaknesses"):
+                            raw = struct["weaknesses"]
+                            print(f"[WEAKNESS FLOW] Raw weaknesses from report: {raw}")
+                            items = [i.strip() for i in raw.replace(",", "\n").split("\n") if i.strip()]
+                            for item in items:
+                                clean = item.lstrip("- *•0123456789.)").strip()
+                                if not clean or len(clean) < 3:
+                                    continue
+                                cat = _map_weakness_category(clean)
+                                print(f"[WEAKNESS FLOW] Extracted: '{clean}' -> category '{cat}'")
+                                ok = database.upsert_weakness(user_id, clean, cat)
+                                print(f"[WEAKNESS FLOW] DB upsert result: {ok}")
+                        else:
+                            print("[WEAKNESS FLOW] No weaknesses field in structured report")
+
+                if st.session_state.get("_interview_report_saved"):
+                    report_data = st.session_state._interview_report_data
+                    pdf_bytes = _generate_pdf_report(report_data)
+                    if pdf_bytes:
+                        st.download_button(
+                            "📄 Download PDF Report",
+                            pdf_bytes,
+                            "interview_report.pdf",
+                            "application/pdf",
+                            use_container_width=True,
+                        )
+
                 if st.session_state.career_report == "":
                     with st.spinner("🎯 Finding best career path..."):
                         st.session_state.career_report = recommend_career(
@@ -758,6 +1369,8 @@ elif st.session_state.current_view == "interview":
                     st.session_state.interview_questions = []
                     st.session_state.interview_results = []
                     st.session_state.career_report = ""
+                    st.session_state.pop("_interview_report_saved", None)
+                    st.session_state.pop("_interview_report_data", None)
                     if "final_report" in st.session_state:
                         del st.session_state.final_report
                     st.rerun()
@@ -766,30 +1379,345 @@ elif st.session_state.current_view == "interview":
 # CAREER VIEW
 # =============================================================
 elif st.session_state.current_view == "career":
+    _t("career_view")
 
     ui.view_header(
         "🎯", "Career Recommendation",
-        "Personalized career path based on your resume and interview performance."
+        "Personalized career path based on your resume, skills, and interests."
     )
 
-    if st.session_state.career_report:
+    # ── Show interview-triggered report if it exists ──
+    if st.session_state.career_report and "_standalone_career_result" not in st.session_state:
         ui.glass_card()
         st.markdown(st.session_state.career_report)
         ui.glass_card_close()
-    elif "resume_text" in st.session_state:
-        ui.glass_card("Generate Recommendation", "🎯")
-        st.markdown(
-            '<p style="color:var(--text-secondary);font-size:14px;margin-bottom:12px;">'
-            "Complete a mock interview first to get your personalized career recommendation.</p>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<p style="text-align:center;color:var(--text-muted);font-size:13px;">'
-            "Go to <strong>Mock Interview</strong> in the sidebar to start.</p>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("---")
+
+    # ── Standalone form ──
+    with st.expander("✏️ Get a New Career Recommendation", expanded="_standalone_career_result" not in st.session_state):
+        with st.form("career_form", clear_on_submit=False):
+            skills = st.text_area(
+                "Your Skills",
+                st.session_state.get("_career_skills", ""),
+                placeholder="e.g. Python, JavaScript, SQL, communication, project management",
+                height=80,
+            )
+            exp_level = st.selectbox(
+                "Experience Level",
+                ["Entry Level / Fresher", "Mid Level (1-3 years)", "Senior (3+ years)"],
+                index=0,
+            )
+            interests = st.text_area(
+                "Your Interests",
+                st.session_state.get("_career_interests", ""),
+                placeholder="e.g. AI/ML, web development, data science, product management",
+                height=80,
+            )
+            submitted = st.form_submit_button("🎯 Generate Career Recommendation", type="primary", use_container_width=True)
+
+    if submitted:
+        if skills.strip() and interests.strip():
+            st.session_state._career_skills = skills
+            st.session_state._career_interests = interests
+            with st.spinner("🎯 Finding best career path..."):
+                result_md = recommend_career_standalone(skills, exp_level, interests)
+            st.session_state._standalone_career_result = result_md
+            st.session_state._standalone_career_data = {
+                "skills": skills, "experience_level": exp_level,
+                "interests": interests, "recommendation_markdown": result_md,
+            }
+            st.session_state.pop("_standalone_career_saved", None)
+            st.rerun()
+
+    if st.session_state.get("_standalone_career_result"):
+        report_md = st.session_state._standalone_career_result
+        ui.glass_card()
+        st.markdown(report_md)
+        ui.glass_card_close()
+
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if not st.session_state.get("_standalone_career_saved"):
+                if st.button("💾 Save Recommendation", use_container_width=True):
+                    if database.save_career_recommendation(user_id, st.session_state._standalone_career_data):
+                        st.session_state._standalone_career_saved = True
+                        st.rerun()
+            else:
+                st.success("✅ Saved to history")
+
+        with col1:
+            if st.button("🔄 New Recommendation", use_container_width=True):
+                st.session_state.pop("_standalone_career_result", None)
+                st.session_state.pop("_standalone_career_data", None)
+                st.session_state.pop("_standalone_career_saved", None)
+                st.rerun()
+
+    # ── History ──
+    st.markdown("---")
+    with st.expander("📜 Past Recommendations", expanded=False):
+        history = database.get_career_recommendations(user_id)
+        if history:
+            for entry in history:
+                with st.container():
+                    st.markdown(f"**{entry.get('created_at', '')}**")
+                    st.markdown(
+                        f"Skills: {entry.get('skills', '')[:80]}...  |  "
+                        f"Level: {entry.get('experience_level', '')}  |  "
+                        f"Interests: {entry.get('interests', '')[:80]}..."
+                    )
+                    if st.button("📄 View", key=f"view_career_{entry['id']}"):
+                        st.session_state._standalone_career_result = entry.get("recommendation_markdown", "")
+                        st.session_state._standalone_career_data = entry
+                        st.session_state.pop("_standalone_career_saved", None)
+                        st.rerun()
+                    st.markdown("---")
+        else:
+            st.caption("No past recommendations yet.")
+
+# =============================================================
+# HISTORY VIEW (Interview Reports)
+# =============================================================
+elif st.session_state.current_view == "history":
+    _t("history_view")
+
+    ui.view_header(
+        "📊", "Interview History",
+        "Your past interview performance reports and scores."
+    )
+
+    reports = database.get_interview_reports(user_id)
+    if not reports:
+        ui.glass_card()
+        st.info("No interview reports yet. Complete a mock interview to see your history here.")
         ui.glass_card_close()
     else:
+        for r in reports:
+            label = f"🏆 Session {r.get('session_id', '')[:12]} — {r.get('overall_score', '?')}/10"
+            with st.expander(label, expanded=False):
+                cols = st.columns(4)
+                metrics = [
+                    ("Overall", r.get("overall_score", "N/A"), "10"),
+                    ("Technical", r.get("technical_score", "N/A"), "10"),
+                    ("Communication", r.get("communication_score", "N/A"), "10"),
+                    ("Confidence", r.get("confidence_score", "N/A"), "10"),
+                ]
+                for col, (name, val, denom) in zip(cols, metrics):
+                    with col:
+                        st.metric(name, f"{val}/{denom}")
+
+                for label, key in [
+                    ("💪 Strengths", "strengths"),
+                    ("⚠️ Weaknesses", "weaknesses"),
+                    ("📈 Improvement Suggestions", "improvement_suggestions"),
+                    ("📚 Recommended Topics", "recommended_topics"),
+                    ("✅ Hiring Recommendation", "hiring_recommendation"),
+                ]:
+                    val = r.get(key, "")
+                    if val:
+                        st.markdown(f"**{label}**")
+                        st.markdown(val)
+                        st.markdown("---")
+
+                if r.get("report_text"):
+                    with st.expander("📄 Full Report"):
+                        st.markdown(r["report_text"])
+
+                st.caption(f"Completed: {r.get('created_at', '')}")
+
+# =============================================================
+# WEAKNESS TRACKING VIEW
+# =============================================================
+elif st.session_state.current_view == "weaknesses":
+    _t("weaknesses_view")
+
+    ui.view_header(
+        "\U0001f6a9", "Weakness Tracking",
+        "Track weaknesses identified in your interviews and monitor improvement."
+    )
+
+    weaknesses = database.get_user_weaknesses(user_id)
+    reports = database.get_interview_reports(user_id)
+    parsed = assessment.parse_resume_analysis(st.session_state.get("resume_analysis", ""))
+    assess = assessment.get_assessment(parsed, reports, weaknesses)
+
+    st.caption(assess["source_label"])
+    if assess["notice"]:
+        st.info(assess["notice"])
+
+    if not weaknesses and not assess["has_resume"]:
         ui.glass_card()
-        st.warning("⚠️ Upload your resume and complete a mock interview to see career recommendations.")
+        st.info("No weaknesses tracked yet. Complete a mock interview and generate a report to see your weaknesses here.")
         ui.glass_card_close()
+    elif not weaknesses and assess["has_resume"]:
+        st.markdown("### \U0001f4c4 Resume-Derived Insights")
+        st.markdown("No interview data yet. Below are insights from your resume analysis.")
+        if parsed.get("weaknesses"):
+            st.markdown("**Resume Weaknesses:**")
+            for w in parsed["weaknesses"]:
+                st.markdown(f"- {w}")
+        if parsed.get("missing_skills"):
+            st.markdown("**Missing Skills:**")
+            for s in parsed["missing_skills"]:
+                st.markdown(f"- {s}")
+        if parsed.get("strengths"):
+            st.markdown("**Resume Strengths:**")
+            for s in parsed["strengths"]:
+                st.markdown(f"- {s}")
+        st.markdown("---")
+
+    # ── Import from past interview reports ──
+    with st.expander("📥 Import Weaknesses from Past Reports", expanded=False):
+        if st.button("🔍 Scan Reports for Weaknesses", use_container_width=True):
+            reports = database.get_interview_reports(user_id)
+            imported_count = 0
+            existing_texts = {w["weakness_text"].strip().lower() for w in weaknesses}
+            for r in reports:
+                text = (r.get("weaknesses") or "").strip()
+                if not text:
+                    continue
+                lines = [l.strip() for l in text.replace("\\n", "\n").split("\n") if l.strip()]
+                for line in lines:
+                    line_clean = line.lstrip("- *•0123456789.)").strip()
+                    if not line_clean or line_clean.lower() in existing_texts:
+                        continue
+                    database.save_weakness(user_id, {
+                        "weakness_text": line_clean,
+                        "category": "General",
+                    })
+                    existing_texts.add(line_clean.lower())
+                    imported_count += 1
+            if imported_count:
+                st.success(f"Imported {imported_count} new weaknesses!")
+            else:
+                st.caption("No new weaknesses found in past reports.")
+            st.rerun()
+
+    if weaknesses:
+        active = [w for w in weaknesses if w["status"] == "active"]
+        improving = [w for w in weaknesses if w["status"] == "improving"]
+        resolved = [w for w in weaknesses if w["status"] == "resolved"]
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Active", len(active))
+        with col2:
+            st.metric("Improving", len(improving))
+        with col3:
+            st.metric("Resolved", len(resolved))
+
+        for group_label, group_list, status_color in [
+            ("\u26a0\ufe0f Active Weaknesses", active, "#ff4b4b"),
+            ("\U0001f4aa Improving", improving, "#ffa726"),
+            ("\u2705 Resolved", resolved, "#66bb6a"),
+        ]:
+            if group_list:
+                st.markdown(f"### {group_label}")
+                for w in group_list:
+                    category = w.get("category", "General")
+                    with st.container():
+                        cols = st.columns([3, 1, 1, 1])
+                        with cols[0]:
+                            st.markdown(f"**{w.get('weakness_text', '')}**")
+                            st.caption(f"Category: {category}  |  Detected {w.get('detected_count', 1)}x")
+                        with cols[1]:
+                            if w["status"] == "active":
+                                if st.button("Improving", key=f"imp_{w['id']}", use_container_width=True):
+                                    database.update_weakness_status(w["id"], "improving")
+                                    st.rerun()
+                        with cols[2]:
+                            if w["status"] != "resolved":
+                                if st.button("Resolved", key=f"res_{w['id']}", use_container_width=True):
+                                    database.update_weakness_status(w["id"], "resolved")
+                                    st.rerun()
+                        with cols[3]:
+                            if st.button("Delete", key=f"del_{w['id']}", use_container_width=True):
+                                try:
+                                    supabase = auth.get_supabase()
+                                    supabase.table("user_weaknesses").delete().eq("id", w["id"]).execute()
+                                except Exception:
+                                    pass
+                                st.rerun()
+                        st.markdown("---")
+
+# =============================================================
+# LEARNING ROADMAP VIEW
+# =============================================================
+elif st.session_state.current_view == "roadmap":
+    _t("roadmap_view")
+
+    ui.view_header(
+        "\U0001f9ed", "Learning Roadmap",
+        "Personalized learning plan based on your weaknesses and skill gaps."
+    )
+
+    weaknesses = database.get_user_weaknesses(user_id)
+    active_weaknesses = [w for w in weaknesses if w["status"] in ("active", "improving")]
+    weaknesses_text = "\n".join(f"- {w['weakness_text']}" for w in active_weaknesses) if active_weaknesses else ""
+
+    with st.form("roadmap_form"):
+        st.text_area(
+            "Areas to Improve",
+            key="_roadmap_weaknesses",
+            value=weaknesses_text,
+            height=100,
+            placeholder="e.g. Data structures, System design, Communication skills",
+        )
+        st.text_area(
+            "Current Skills (optional)",
+            key="_roadmap_skills",
+            height=80,
+            placeholder="e.g. Python, JavaScript, SQL, React",
+        )
+        submitted = st.form_submit_button("\U0001f9ed Generate Learning Roadmap", type="primary", use_container_width=True)
+
+    if submitted:
+        w_text = st.session_state._roadmap_weaknesses
+        s_text = st.session_state.get("_roadmap_skills", "")
+        if w_text.strip():
+            with st.spinner("\U0001f9ed Creating your personalized roadmap..."):
+                roadmap = generate_learning_roadmap(w_text, s_text)
+            st.session_state._roadmap_result = roadmap
+            st.session_state._roadmap_input = {"weaknesses_input": w_text, "roadmap_markdown": roadmap}
+            st.session_state.pop("_roadmap_saved", None)
+            st.rerun()
+
+    if st.session_state.get("_roadmap_result"):
+        ui.glass_card()
+        st.markdown(st.session_state._roadmap_result)
+        ui.glass_card_close()
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if not st.session_state.get("_roadmap_saved"):
+                if st.button("\U0001f4be Save Roadmap", use_container_width=True):
+                    if database.save_learning_roadmap(user_id, st.session_state._roadmap_input):
+                        st.session_state._roadmap_saved = True
+                        st.rerun()
+            else:
+                st.success("\u2705 Saved")
+        with col2:
+            if st.button("\U0001f504 New Roadmap", use_container_width=True):
+                st.session_state.pop("_roadmap_result", None)
+                st.session_state.pop("_roadmap_input", None)
+                st.session_state.pop("_roadmap_saved", None)
+                st.rerun()
+
+    st.markdown("---")
+    with st.expander("\U0001f4da Past Roadmaps", expanded=False):
+        past = database.get_learning_roadmaps(user_id)
+        if past:
+            for entry in past:
+                with st.container():
+                    st.markdown(f"**{entry.get('created_at', '')}**")
+                    if st.button("\U0001f4dd View", key=f"view_roadmap_{entry['id']}", use_container_width=True):
+                        st.session_state._roadmap_result = entry.get("roadmap_markdown", "")
+                        st.session_state._roadmap_input = entry
+                        st.session_state.pop("_roadmap_saved", None)
+                        st.rerun()
+                    st.markdown("---")
+        else:
+            st.caption("No past roadmaps yet.")
+
+# ── Timing report printed to terminal every rerun ──
+print("RERUN")
+_t_report()
